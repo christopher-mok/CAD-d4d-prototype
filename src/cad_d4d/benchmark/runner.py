@@ -61,9 +61,13 @@ class MethodSpec:
     proposals: dict = field(default_factory=dict)  # ProposalConfig overrides
     disc: dict = field(default_factory=dict)       # DiscretizationConfig overrides (e.g. crease_weight)
     rank_by: str = "ratio"                         # refinement ranking (ScoringConfig.rank_by)
+    continuous: dict = field(default_factory=dict)  # ContinuousConfig overrides (all methods, polish included)
 
     def key(self) -> str:
-        return json.dumps(dataclasses.asdict(self), sort_keys=True)
+        d = dataclasses.asdict(self)
+        if not d["continuous"]:
+            del d["continuous"]  # keeps cache keys of runs made before the field existed
+        return json.dumps(d, sort_keys=True)
 
 
 def exact_metrics(state: CADState, target) -> dict:
@@ -96,18 +100,19 @@ def run_method(target, method: MethodSpec, budget: Budget, base_cfg: ObjectiveCo
     r0 = initial_radius(target)
     t0 = time.perf_counter()
     events = []
+    cont = ContinuousConfig(**method.continuous)
     if method.kind == "fixed":
         state = build_cube_complex(sphere_map(r0), n_interior_knots=method.k)
-        ContinuousOptimizer(obj, ContinuousConfig()).run(state, budget.steps)
+        ContinuousOptimizer(obj, cont).run(state, budget.steps)
         if budget.polish_steps:
-            polish_continuous(obj, state, budget.polish_steps, ContinuousConfig())
+            polish_continuous(obj, state, budget.polish_steps, cont)
     elif method.kind == "srd":
         state = build_cube_complex(sphere_map(r0))
         pcfg = dataclasses.replace(ProposalConfig(), **method.proposals)
         scfg = SRDConfig(rounds=budget.rounds, steps_per_round=budget.steps_per_round, seed=method.seed,
                          polish_steps=budget.polish_steps,
                          scoring=ScoringConfig(mode=method.mode, rank_by=method.rank_by),
-                         proposals=pcfg, **method.srd)
+                         proposals=pcfg, continuous=cont, **method.srd)
         res = SRD(obj, scfg).run(state)
         state, events = res.state, res.events
     else:

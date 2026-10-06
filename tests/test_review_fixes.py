@@ -67,7 +67,7 @@ def test_monotone_self_intersection_rule(reachable_target, coarse_sphere, monkey
     opt = ContinuousOptimizer(obj)
 
     s = coarse_sphere.copy()
-    monkeypatch.setattr(Discretization, "count_self_intersections", lambda self, X, return_hits=False: 3)
+    monkeypatch.setattr(Discretization, "count_self_intersections", lambda self, X, return_hits=False: (3, []) if return_hits else 3)
     logs = opt.run(s, 5)  # pre-existing, not worsened
     assert all(l["eta"] > 0 for l in logs)
 
@@ -79,8 +79,40 @@ def test_monotone_self_intersection_rule(reachable_target, coarse_sphere, monkey
     X_cur = disc.check.evaluate(P0)[0]
 
     def growing(self, X, return_hits=False):  # every trial looks worse than the current state
-        return 3 if torch.equal(X, X_cur) else 4
+        n = 3 if torch.equal(X, X_cur) else 4
+        return (n, []) if return_hits else n
 
     monkeypatch.setattr(Discretization, "count_self_intersections", growing)
     P_new, log = opt.step(s, P0, 0.5, disc)
     assert P_new is None and log["invalid"] > 0
+
+
+def test_contact_freezes_only_the_intersecting_face(reachable_target, coarse_sphere, monkeypatch):
+    """A step blocked by self-contact in one face is retried with that face's DOFs frozen,
+    so the rest of the model keeps moving."""
+    import torch
+    from cad_d4d.device import to_tensor
+    from cad_d4d.optimization.discretization import Discretization
+    obj = ShapeObjective(reachable_target, ObjectiveConfig())
+    opt = ContinuousOptimizer(obj)
+    s = coarse_sphere.copy()
+    P0 = to_tensor(s.values())
+    disc = obj.disc(s)
+    c = disc.check
+    fid = c.face_order[0]
+    off, nu, nv = c.face_slices[fid]
+    X_cur = c.evaluate(P0)[0]
+    tri0 = int((c.tri_face_t == 0).nonzero()[0])
+
+    def contact(self, X, return_hits=False):  # any motion of face ``fid`` "intersects"
+        moved = not torch.allclose(X[off: off + nu * nv], X_cur[off: off + nu * nv], atol=1e-15, rtol=0)
+        n, hits = (1, [(tri0, tri0)]) if moved else (0, [])
+        return (n, hits) if return_hits else n
+
+    monkeypatch.setattr(Discretization, "count_self_intersections", contact)
+    P_new, log = opt.step(s, P0, 0.5, disc)
+    assert P_new is not None and log["frozen_faces"] == [fid] and log["eta"] > 1e-3
+    cols = s.dof_map.face_rows(fid).indices
+    assert torch.equal(P_new[cols], P0[cols])          # the contact face did not move
+    assert float((P_new - P0).abs().max()) > 1e-6       # everything else did
+    assert log["new_loss"] < log["loss"]

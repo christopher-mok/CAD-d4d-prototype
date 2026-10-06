@@ -15,6 +15,8 @@ both by log-log interpolation along the uniform curve.
 from __future__ import annotations
 
 import argparse
+import dataclasses
+import json
 import sys
 import time
 from pathlib import Path
@@ -54,6 +56,15 @@ def method_registry() -> dict[str, MethodSpec]:
         for lam in (3e-8, 1e-7):
             m.append(MethodSpec(f"srd_C_crease{w:g}_lam{lam:g}", "srd", seed=0, lambda_complex=lam,
                                 disc={"crease_weight": w}))
+    # refinement scoring metric decoupled from the optimizer's preconditioner
+    for pc, short in (("semi_implicit", "lumped"), ("consistent_mass", "cm")):
+        m += [MethodSpec(f"srd_C_score{short}_s{s}", "srd", seed=s, srd={"scoring_preconditioner": pc})
+              for s in (0, 1)]
+    # grammar variant: ResidualRefine (knots at residual quantiles) replaces FaceRefine
+    rr = {"kind_weights": {"LocalRefine": 1.0, "KnotInsert": 0.3, "CarrierKnotInsert": 0.3, "ResidualRefine": 0.3},
+          "global_kinds": ["CarrierKnotInsert", "ResidualRefine"]}
+    m += [MethodSpec(f"srd_C_rr_s{s}", "srd", seed=s, proposals=rr, srd={"scoring_preconditioner": "consistent_mass"})
+          for s in (0, 1)]
     return {x.name: x for x in m}
 
 
@@ -148,6 +159,8 @@ def main():
     ap.add_argument("--steps", type=int, default=40)
     ap.add_argument("--polish", type=int, default=200, help="final exact-SDF steps (all methods)")
     ap.add_argument("--out", default=str(ROOT / "experiments" / "benchmark_out"))
+    ap.add_argument("--continuous", default="", help="ContinuousConfig overrides for every method, as JSON, "
+                    "e.g. '{\"preconditioner\": \"consistent_mass\"}'")
     ap.add_argument("--report", action="store_true")
     ap.add_argument("--dashboard", action="store_true", help="write the interactive dashboard (viewer.html)")
     args = ap.parse_args()
@@ -157,6 +170,8 @@ def main():
     names = args.targets or [n for n, t in cat.items() if args.split in ("all", t["split"])]
     reg = method_registry()
     methods = [reg[n] for n in args.methods] if args.methods else default_methods()
+    if args.continuous:
+        methods = [dataclasses.replace(m, continuous=json.loads(args.continuous)) for m in methods]
     budget = Budget(args.rounds, args.steps, args.polish)
     print(f"device {get_device()}; targets {names}; {len(methods)} methods; {budget.steps} steps", flush=True)
     for t in names:

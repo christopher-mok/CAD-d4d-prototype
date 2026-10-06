@@ -134,3 +134,25 @@ def test_exact_narrow_band_removes_trilinear_floor(reachable_target):
     # offset points: signed distance with the right sign and magnitude
     n_pts = X + 0.02 * (X / np.linalg.norm(X, axis=1, keepdims=True))
     assert np.all(to_numpy(sdf(n_pts)) > 0)
+
+
+def test_consistent_mass_preconditioner(reachable_target, coarse_sphere):
+    from cad_d4d.optimization.continuous import ContinuousConfig
+    from cad_d4d.optimization.preconditioner import consistent_mass, lumped_mass
+    obj = ShapeObjective(reachable_target)
+    s = coarse_sphere.copy()
+    gi = ContinuousOptimizer(obj).gradient(s)
+    disc = obj.disc(s)
+    M = consistent_mass(disc, gi.terms["w"])
+    # the lumped mass is the row-sum lumping of the consistent mass (partition of unity)
+    assert torch.allclose(M.sum(1), lumped_mass(disc, gi.terms["w"]), rtol=1e-10, atol=1e-14)
+    assert torch.allclose(M, M.t(), atol=1e-15)
+    # lumping only over-estimates the mass (M_lumped - M is diagonally dominant), so the
+    # consistent metric sees at least as much first-order descent
+    gi_c = ContinuousOptimizer(obj, ContinuousConfig(preconditioner="consistent_mass")).gradient(s)
+    assert gi_c.descent_capacity >= gi.descent_capacity
+    L0 = obj.report(s)["fit"]
+    logs = ContinuousOptimizer(obj, ContinuousConfig(preconditioner="consistent_mass")).run(s, 40)
+    assert obj.report(s)["fit"] < 0.05 * L0
+    assert all(b["loss"] <= a["loss"] + 1e-15 for a, b in zip(logs, logs[1:]))
+    assert watertightness_error(s) < 1e-13

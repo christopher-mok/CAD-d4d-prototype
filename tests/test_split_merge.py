@@ -212,3 +212,45 @@ def test_face_refine_bisects_spans_exactly():
     assert len(f.knots_u) == len(s.cx.faces[fid].knots_u) + 2  # 2 spans -> 2 midpoints
     assert root_deviation(s, s2) < 1e-13
     assert_watertight_for_random_dofs(s2)
+
+
+def test_equidistributed_knots_follow_residual_mass():
+    from cad_d4d.rewrites.local_refine import equidistributed_knots
+    t = np.linspace(0, 1, 401)
+    mass = np.exp(-((t - 0.8) / 0.05) ** 2)          # residual concentrated near t = 0.8
+    ks = equidistributed_knots(t, mass, existing=np.array([0.5]), m=3, min_gap=0.03, floor=0.2)
+    assert len(ks) >= 2 and all(0.6 < k < 0.95 for k in ks)
+    assert min(np.diff([0.0, *ks, 1.0])) >= 0.03 and all(abs(k - 0.5) >= 0.03 for k in ks)
+    flat = equidistributed_knots(t, np.zeros_like(t), existing=np.array([]), m=3, min_gap=0.03)
+    assert np.allclose(flat, [0.25, 0.5, 0.75])      # no residual: uniform placement
+
+
+def test_residual_refine_is_exact_and_refines_carriers():
+    from cad_d4d.geometry.topology import SIDES
+    from cad_d4d.rewrites.local_refine import ResidualRefine
+    s = perturbed_state(16)
+    fid = sorted(s.cx.faces)[0]
+    out = ResidualRefine(fid, knots_u=[0.7, 0.85], knots_v=[0.3]).apply(s)
+    assert out.ok, out.reason
+    s2 = out.state
+    f = s2.cx.faces[fid]
+    assert len(f.knots_u) == 10 and len(f.knots_v) == 9
+    assert root_deviation(s, s2) < 1e-13
+    assert_watertight_for_random_dofs(s2)
+    for side in SIDES:
+        for use in f.sides[side]:
+            assert len(s2.cx.carriers[s2.cx.edges[use.edge].carrier].knots) > 8
+    assert not ResidualRefine(fid).apply(s).ok
+
+
+def test_residual_refine_proposals_come_from_sampler(reachable_target, coarse_sphere):
+    from cad_d4d.device import to_tensor
+    from cad_d4d.losses.objective import ObjectiveConfig, ShapeObjective
+    from cad_d4d.optimization.proposal_sampling import ProposalConfig, ProposalSampler
+    obj = ShapeObjective(reachable_target, ObjectiveConfig())
+    s = coarse_sphere
+    terms = obj.terms(s, to_tensor(s.values()))
+    smp = ProposalSampler(ProposalConfig(kind_weights={"ResidualRefine": 1.0}, adaptive_scale=False), seed=0)
+    props = smp.refinements(obj, s, terms)
+    assert props and all(p.kind == "ResidualRefine" for p in props)
+    assert all(p.apply(s).ok for p in props[:3])

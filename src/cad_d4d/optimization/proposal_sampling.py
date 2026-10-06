@@ -13,7 +13,8 @@ sample (max). Locations are drawn with probability
 in physical units). Without a shape target (physics-only objectives) the
 residual is zero and sampling falls back to area-uniform. Refinement kinds:
 LocalRefine (optionally refining its window's carriers), FaceRefine,
-KnotInsert, CarrierKnotInsert, SplitFace. Simplification candidates
+ResidualRefine (FaceRefine's resolution increase with knots placed at quantiles
+of the face's residual), KnotInsert, CarrierKnotInsert, SplitFace. Simplification candidates
 (KnotRemove -- pre-filtered by invariant I1 --, MergeFace, CarrierKnotRemove)
 are enumerated and subsampled.
 """
@@ -31,7 +32,7 @@ from ..losses.objective import ShapeObjective
 from ..rewrites.carrier_knots import CarrierKnotInsert, carrier_knot_remove_candidates
 from ..rewrites.knot_insert import KnotInsert
 from ..rewrites.knot_remove import knot_remove_candidates
-from ..rewrites.local_refine import FaceRefine, LocalRefine
+from ..rewrites.local_refine import FaceRefine, LocalRefine, ResidualRefine, equidistributed_knots
 from ..rewrites.merge_face import merge_face_candidates
 from ..rewrites.split_face import SplitFace
 
@@ -60,6 +61,8 @@ class ProposalConfig:
     adaptive_scale: bool = True
     spread_threshold: float = 0.04
     min_knot_gap: float = 0.04
+    residual_floor: float = 0.2      # ResidualRefine: uniform share of the knot density
+    min_root_span: float = 0.03      # ResidualRefine: minimum new span, root-face units
     eps_remove: float = 5e-3
     eps_merge: float = 5e-3
 
@@ -110,6 +113,7 @@ class ProposalSampler:
 
     def location_probabilities(self, objective, state, terms) -> np.ndarray:
         rf = residual_field(objective, state, terms)
+        self.last_rf = rf
         self.last_spread = residual_spread(rf)
         if self.cfg.mode == "uniform":
             p = rf["w"].copy()
@@ -149,6 +153,10 @@ class ProposalSampler:
                                        refine_boundary=bool(self.rng.random() < cfg.p_refine_boundary)))
             elif kind == "FaceRefine":
                 out.append(FaceRefine(fid))
+            elif kind == "ResidualRefine":
+                rw = self.residual_proposal(state, sm, fid, str(self.rng.choice(["uv", "u", "v"], p=[0.5, 0.25, 0.25])))
+                if rw is not None:
+                    out.append(rw)
             elif kind == "CarrierKnotInsert":
                 rw = self.carrier_proposal(state, fid, float(u), float(v))
                 if rw is not None:
@@ -163,6 +171,28 @@ class ProposalSampler:
                     continue
                 out.append(KnotInsert(fid, axis, t) if kind == "KnotInsert" else SplitFace(fid, axis, t))
         return out
+
+    def residual_proposal(self, state: CADState, sm, fid: int, axes: str):
+        """ResidualRefine on face ``fid``: per axis, as many new knots as the face has spans,
+        equidistributing the residual mass w * e of the face's samples along that axis."""
+        f = state.cx.faces[fid]
+        off, nu, nv = sm.face_slices[fid]
+        sl = slice(off, off + nu * nv)
+        mass = (self.last_rf["w"] * self.last_rf["e"])[sl]
+        uv = np.asarray(sm.sample_uv[sl])
+        new = {}
+        for k, axis in enumerate("uv"):
+            if axis not in axes:
+                new[axis] = []
+                continue
+            knots, p = (f.knots_u, f.degree_u) if axis == "u" else (f.knots_v, f.degree_v)
+            existing = bb.interior_knots(knots, p)
+            size = f.domain[2 * k + 1] - f.domain[2 * k]
+            new[axis] = equidistributed_knots(uv[:, k], mass, existing, len(existing) + 1,
+                                              max(self.cfg.min_root_span / size, 0.02), self.cfg.residual_floor)
+        if not new["u"] and not new["v"]:
+            return None
+        return ResidualRefine(fid, new["u"], new["v"])
 
     def carrier_proposal(self, state: CADState, fid: int, u: float, v: float):
         """Refine the carrier of the face side nearest to (u, v) at the corresponding parameter."""

@@ -42,6 +42,12 @@ class SRDConfig:
     lookahead_shortlist: int = 3
     track_counterfactual: int = 0  # number of accepted refinements to compare against no-rewrite runs
     polish_steps: int = 0  # final continuous steps against the exact narrow-band SDF (no rewrites)
+    # Preconditioner M of the descent capacity D = g^T M^{-1} g used to *score* refinements
+    # (None: the continuous optimizer's). Default: the consistent L2 mass. The lumped mass
+    # understates the descent available in fine-scale (oscillatory) control modes -- exactly
+    # the modes an exact refinement adds -- so lumped scores under-predict useful refinements.
+    # Steps keep the lumped/semi-implicit metric, which is more local (better on small features).
+    scoring_preconditioner: str | None = "consistent_mass"
     seed: int = 0
     continuous: ContinuousConfig = field(default_factory=ContinuousConfig)
     scoring: ScoringConfig = field(default_factory=ScoringConfig)
@@ -99,7 +105,11 @@ class SRD:
             objective.cfg.complexity, use_grace=self.cfg.scoring.mode == "marginal_birth"))
         self.obj = ShapeObjective(objective.target, ocfg)
         self.opt = ContinuousOptimizer(self.obj, self.cfg.continuous)
-        self.scorer = RewriteScorer(self.obj, self.opt, self.cfg.scoring)
+        score_opt = self.opt
+        if self.cfg.scoring_preconditioner not in (None, self.cfg.continuous.preconditioner):
+            score_opt = ContinuousOptimizer(self.obj, dataclasses.replace(
+                self.cfg.continuous, preconditioner=self.cfg.scoring_preconditioner))
+        self.scorer = RewriteScorer(self.obj, score_opt, self.cfg.scoring)
         self.sampler = ProposalSampler(self.cfg.proposals, self.cfg.seed)
 
     # ------------------------------------------------------------------

@@ -183,3 +183,66 @@ class FaceRefine(Rewrite):
         if self.refine_boundary:
             born += refine_boundary_carriers(state, self.face)
         return RewriteOutcome(state, info={"born_faces": list(dict.fromkeys(born)), "refined_face": self.face})
+
+
+def equidistributed_knots(t: np.ndarray, mass: np.ndarray, existing: np.ndarray, m: int,
+                          min_gap: float, floor: float = 0.2, bins: int = 256) -> list[float]:
+    """Up to ``m`` new knot values in (0, 1) at quantiles of a residual mass distribution.
+
+    The density is ``(1 - floor) * mass / sum(mass) + floor * uniform`` (the floor keeps
+    knots from collapsing onto a single peak); knot j sits at its ``j / (m + 1)``
+    quantile. Values closer than ``min_gap`` to 0, 1, an existing knot or an already
+    chosen one are dropped, so fewer than ``m`` may be returned.
+    """
+    hist = np.histogram(np.clip(t, 0.0, 1.0), bins=bins, range=(0.0, 1.0), weights=np.maximum(mass, 0.0))[0]
+    dens = (1.0 - floor) * hist / hist.sum() if hist.sum() > 0 else np.zeros(bins)
+    dens = dens + (floor if hist.sum() > 0 else 1.0) / bins
+    cdf = np.concatenate([[0.0], np.cumsum(dens)])
+    cdf /= cdf[-1]
+    grid = np.linspace(0.0, 1.0, bins + 1)
+    taken = [0.0, 1.0, *np.asarray(existing, float).tolist()]
+    out = []
+    for j in range(1, m + 1):
+        x = float(np.interp(j / (m + 1), cdf, grid))
+        if min(abs(x - y) for y in taken) >= min_gap:
+            out.append(x)
+            taken.append(x)
+    return sorted(out)
+
+
+class ResidualRefine(Rewrite):
+    """Insert knots into one face at given positions (chosen where the residual is,
+    by error equidistribution) and refine its bounding carriers there: FaceRefine's
+    resolution increase, but with the new spans placed by the residual instead of
+    bisecting every span. Exact (knot insertion only)."""
+
+    kind = "ResidualRefine"
+    exact = True
+    refinement = True
+
+    def __init__(self, face: int, knots_u=(), knots_v=(), refine_boundary: bool = True):
+        self.face = face
+        self.knots_u = [float(x) for x in knots_u]
+        self.knots_v = [float(x) for x in knots_v]
+        self.refine_boundary = bool(refine_boundary)
+
+    def touched_faces(self, state):
+        return LocalRefine(self.face, 0.5, 0.5, refine_boundary=self.refine_boundary).touched_faces(state)
+
+    def location(self, state):
+        return face_center_point(state, self.face) if self.face in state.cx.faces else None
+
+    def _apply(self, state: CADState) -> RewriteOutcome:
+        if self.face not in state.cx.faces:
+            return RewriteOutcome(None, "face missing")
+        if not self.knots_u and not self.knots_v:
+            return RewriteOutcome(None, "no knots")
+        for axis, ts in (("u", self.knots_u), ("v", self.knots_v)):
+            for t in ts:
+                reason = insert_knot_in_place(state, self.face, axis, t)
+                if reason:
+                    return RewriteOutcome(None, reason)
+        born = [self.face]
+        if self.refine_boundary:
+            born += refine_boundary_carriers(state, self.face)
+        return RewriteOutcome(state, info={"born_faces": list(dict.fromkeys(born)), "refined_face": self.face})

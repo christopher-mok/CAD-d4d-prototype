@@ -21,6 +21,7 @@ import torch  # noqa: E402
 from matplotlib.colors import LinearSegmentedColormap  # noqa: E402
 from mpl_toolkits.mplot3d.art3d import Line3DCollection, Poly3DCollection  # noqa: E402
 
+from ..geometry import bspline_basis as bb  # noqa: E402
 from ..geometry.state import CADState  # noqa: E402
 from ..geometry.tessellation import SamplingConfig, SurfaceSampler  # noqa: E402
 
@@ -80,16 +81,29 @@ def boundary_curves(state: CADState, n: int = 24) -> list[np.ndarray]:
     return out
 
 
+def knot_lines(state: CADState, n: int = 24) -> list[np.ndarray]:
+    """Iso-parameter curves at every interior knot of every face (the structure's mesh lines)."""
+    t = np.linspace(0, 1, n)
+    out = []
+    for f in state.cx.faces.values():
+        for k in np.unique(np.round(bb.interior_knots(f.knots_u, f.degree_u), 12)):
+            out.append(state.evaluate(f.id, np.stack([np.full(n, k), t], 1)))
+        for k in np.unique(np.round(bb.interior_knots(f.knots_v, f.degree_v), 12)):
+            out.append(state.evaluate(f.id, np.stack([t, np.full(n, k)], 1)))
+    return out
+
+
 def plot_state(ax, state: CADState, target=None, residual: bool = True, show_net: bool = True,
                show_points: bool = True, highlight_refined: bool = True, proposals=None,
-               title: str | None = None, view=(20, 35), sampling: SamplingConfig | None = None):
+               title: str | None = None, view=(20, 35), sampling: SamplingConfig | None = None,
+               show_knots: bool = False, vmax: float | None = None):
     sm = SurfaceSampler(state, sampling or SamplingConfig(min_res=13, per_span=3, max_res=25))
     X, _, _ = sm.evaluate_np(state.values())
     tris = X[sm.tri]
     if residual and target is not None:
         phi = np.abs(target.sdf(torch.as_tensor(X, device=target.sdf.values.device)).cpu().numpy())
         vals = phi[sm.tri].mean(1)
-        vmax = max(float(np.quantile(phi, 0.99)), 1e-6)
+        vmax = max(float(np.quantile(phi, 0.99)), 1e-6) if vmax is None else vmax
         colors = SEQ(np.clip(vals / vmax, 0, 1))
     else:
         colors = np.tile(np.array([[0.80, 0.86, 0.95, 1.0]]), (len(tris), 1))
@@ -111,6 +125,8 @@ def plot_state(ax, state: CADState, target=None, residual: bool = True, show_net
                 refined_lines += [state.evaluate(f.id, f.side_uv(s, t)) for s in ("v0", "u1", "v1", "u0")]
         if refined_lines:
             ax.add_collection3d(Line3DCollection(refined_lines, colors=REFINED, linewidths=1.6))
+    if show_knots:
+        ax.add_collection3d(Line3DCollection(knot_lines(state), colors=INK_2, linewidths=0.35, alpha=0.8))
     if show_net:
         segs = []
         for net in state.nets().values():

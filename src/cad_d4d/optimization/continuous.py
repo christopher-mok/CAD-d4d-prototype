@@ -34,6 +34,8 @@ class ContinuousConfig:
     max_backtracks: int = 20
     max_failed_steps: int = 3  # consecutive failed steps before a phase is abandoned
     preconditioner: str = "semi_implicit"
+    mass_blend: float = 0.0  # consistent_mass only: share of the lumped mass blended in
+    freeze_contact: bool = True  # on self-contact, retry the step with the intersecting faces' DOFs frozen
     validity: ValidityConfig = field(default_factory=ValidityConfig)
 
 
@@ -72,7 +74,7 @@ class ContinuousOptimizer:
         terms = self.obj.terms(state, P, disc)
         (g,) = torch.autograd.grad(terms["smooth"], P)
         pc = Preconditioner(disc, terms["w"], self.cfg.preconditioner,
-                            lambda_fair=self.obj.cfg.lambda_fair, tau=self.cfg.eta)
+                            lambda_fair=self.obj.cfg.lambda_fair, tau=self.cfg.eta, mass_blend=self.cfg.mass_blend)
         terms = {k: (v.detach() if torch.is_tensor(v) else v) for k, v in terms.items()}
         return GradientInfo(terms, g, pc)
 
@@ -88,8 +90,11 @@ class ContinuousOptimizer:
                 ok, info = jacobian_check(Xu, Xv, disc.check.sample_face_t, ref_normals, vc.eps_jacobian_rel,
                                           vc.check_orientation)
             if ok and nonlocal_ and vc.check_self_intersection:
-                n_hit = disc.count_self_intersections(X)
+                n_hit, hits = disc.count_self_intersections(X, return_hits=True)
                 info["n_self_intersections"] = n_hit
+                if hits:
+                    tf = disc.check.tri_face_t[torch.as_tensor(hits, device=X.device).ravel()]
+                    info["hit_faces"] = {disc.check.face_order[k] for k in tf.unique().tolist()}
                 ok = n_hit == 0
         return ok, info
 
@@ -107,17 +112,47 @@ class ContinuousOptimizer:
 
     # -- main loop ---------------------------------------------------------
     def step(self, state: CADState, P: torch.Tensor, eta: float, disc: Discretization):
-        """One preconditioned step with backtracking. Returns (P_new or None, log)."""
+        """One preconditioned step with backtracking. Returns (P_new or None, log).
+
+        Active set for self-contact: if backtracking was forced by self-intersections, a
+        second line search runs with the DOFs of the intersecting faces frozen (the step
+        re-solved on the free DOFs), and the better of the two accepted steps is taken. A
+        near-fold in one face then no longer shrinks the step of the whole model.
+        """
         cfg = self.cfg
         gi = self.gradient(state, P, disc)
         d = gi.direction
-        gd = float((gi.g * d).sum())
         L0 = float(gi.terms["smooth"])
         ref = self.reference_normals(disc, P.detach())
-        t = eta
         log = {"loss": L0, "sdf": float(gi.terms["sdf"]), "coverage": float(gi.terms["coverage"]),
-               "fair": float(gi.terms["fair"]), "D": gd, "backtracks": 0, "invalid": 0}
-        n_cur = None  # self-intersections of the current configuration (computed only if needed)
+               "fair": float(gi.terms["fair"]), "D": float((gi.g * d).sum()), "backtracks": 0, "invalid": 0}
+        ctx = {"n_cur": None}  # self-intersections of the current configuration (computed only if needed)
+        best = self._line_search(state, P, d, log["D"], L0, eta, disc, ref, log, ctx)
+        if ctx.get("hit_faces") and cfg.freeze_contact:
+            frozen = torch.zeros(len(d), dtype=torch.bool, device=d.device)
+            for fid in ctx["hit_faces"]:
+                frozen[torch.as_tensor(state.dof_map.face_rows(fid).indices, device=d.device, dtype=torch.long)] = True
+            d_free = gi.precond.solve_restricted(gi.g, ~frozen)
+            gd_free = float((gi.g * d_free).sum())
+            if gd_free > 0:
+                sub = {"backtracks": 0, "invalid": 0}
+                alt = self._line_search(state, P, d_free, gd_free, L0, eta, disc, ref, sub, {"n_cur": ctx["n_cur"]})
+                log["invalid"] += sub["invalid"]
+                if alt is not None and (best is None or alt[2] < best[2]):
+                    best = alt
+                    log["frozen_faces"] = sorted(ctx["hit_faces"])
+        if best is None:
+            log.update(eta=0.0, new_loss=L0, backtracks=cfg.max_backtracks)
+            return None, log
+        P_new, t, L1, k = best
+        log.update(eta=t, new_loss=L1, backtracks=k)
+        return P_new, log
+
+    def _line_search(self, state, P, d, gd, L0, t, disc, ref, log, ctx):
+        """Armijo backtracking along -d with validity checks. Returns (P, t, L, backtracks) or None.
+
+        Records in ``ctx`` the faces of the first self-intersection that forced a backtrack."""
+        cfg = self.cfg
         for k in range(cfg.max_backtracks):
             P_try = P.detach() - t * d
             ok, _ = self.is_valid(disc, P_try, ref, local=True, nonlocal_=False)
@@ -130,18 +165,18 @@ class ContinuousOptimizer:
                         # Monotone rule: a step may not *add* self-intersections. A state that already
                         # contains one (e.g. a fold revealed when a rewrite re-sampled the check
                         # tessellation) must not freeze the optimizer: it may move, and unfold.
-                        if n_cur is None:
-                            n_cur = self.self_intersections(disc, P.detach())
-                        ok = info.get("n_self_intersections", 0) <= n_cur
+                        if ctx["n_cur"] is None:
+                            ctx["n_cur"] = self.self_intersections(disc, P.detach())
+                        ok = info.get("n_self_intersections", 0) <= ctx["n_cur"]
+                        if not ok and "hit_faces" not in ctx:
+                            ctx["hit_faces"] = info.get("hit_faces", set())
                     if ok:
-                        log.update(eta=t, new_loss=L1, backtracks=k)
-                        return P_try, log
+                        return P_try, t, L1, k
                     log["invalid"] += 1
             else:
                 log["invalid"] += 1
             t *= 0.5
-        log.update(eta=0.0, new_loss=L0, backtracks=cfg.max_backtracks)
-        return None, log
+        return None
 
     def run(self, state: CADState, n_steps: int, eta: float | None = None, callback=None) -> list[dict]:
         """Optimize ``state``'s values in place for ``n_steps``; ages birth records."""

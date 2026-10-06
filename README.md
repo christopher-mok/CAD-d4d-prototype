@@ -27,9 +27,10 @@ uploaded once.
 
 ```bash
 pip install -e .[test]            # numpy, scipy, torch, matplotlib, pyyaml, pytest
-python -m pytest                  # 93 tests, ~45 s on GPU (CAD_D4D_DEVICE=cpu: ~3 min)
+python -m pytest                  # 98 tests, ~50 s on GPU (CAD_D4D_DEVICE=cpu: ~3 min)
 python experiments/adaptive_refinement.py [--record]   # single-target baseline, 3 SRD seeds (~10 min)
-python experiments/benchmark.py --split test --tag v2 --report --dashboard   # 13-target benchmark
+python experiments/benchmark.py --split test --tag v4 --report --dashboard   # 13-target benchmark
+python experiments/make_figures.py targets|fits a_super_bumps:1|efficiency  # PNGs in docs/images
 python experiments/compliance_shape.py                 # FEM: compliance-driven cantilever (~1 min)
 python -m cad_d4d.visualization.web --recording run.json --benchmark experiments/benchmark_out/results.jsonl -o viewer.html
 ```
@@ -151,6 +152,17 @@ plus one step), and `B_refine = D_new - D_old`.
 Inexact rewrites always use the immediate objective difference. Optional lookahead
 (`lookahead_steps`) replaces shortlisted scores with gains realized against the counterfactual.
 
+**Scoring metric vs. step metric.** Refinements are scored with `D` in the *consistent* L2
+metric, `M = G^T W G` (`SRDConfig.scoring_preconditioner = "consistent_mass"`, the default),
+while continuous steps keep the semi-implicit lumped metric. The lumped mass is the row-sum
+lumping of `G^T W G`; for bicubic patches it overstates the mass of oscillatory control modes by
+up to ~1000x (smallest eigenvalue of `diag(m)^{-1/2} M diag(m)^{-1/2}` is about 1e-3). Those are
+exactly the modes an exact refinement adds, so the lumped `D_new - D_old` under-predicted useful
+refinements: they lost to their birth cost, and SRD stalled on shapes with many spread
+features. Consistent-mass *steps* (`ContinuousConfig.preconditioner = "consistent_mass"`) are
+available too: they converge uniform fits ~3x faster but make steps less local and lost on the
+grammar targets, so they are not the default.
+
 **Boundary refinement.** Face KnotInsert only adds interior DOFs, since boundaries come from
 carriers. CarrierKnotInsert refines the carrier itself: it first inserts the mapped knot into
 every face side that follows the carrier, then into the carrier, exactly. CarrierKnotRemove is
@@ -220,6 +232,16 @@ exist. A rewrite that re-samples the check tessellation can reveal a pre-existin
 under the absolute rule every later step inherited it and the optimizer froze for the rest of
 the run. SRD also refuses rewrites whose new structure shows more intersections than the
 parent. The continuous step size is reset after accepted rewrites.
+
+**Contact freezing.** If self-intersections force a step to backtrack, a second line search runs
+with the DOFs of the intersecting faces frozen (the step re-solved on the free DOFs), and the
+better step is taken (`ContinuousConfig.freeze_contact`). Otherwise one face approaching a fold
+shrinks the step of the whole model to ~1e-14.
+
+**ResidualRefine (optional rule).** Inserts as many knots per direction as a face has spans, at
+quantiles of the face's residual mass (with a 20% uniform floor), and refines the bounding
+carriers there: FaceRefine's resolution increase, with spans placed by the residual instead of
+bisected. Exact. Enable it via `ProposalConfig.kind_weights` / `global_kinds`.
 
 **FEM (fixed-grid compliance).** `physics/fem.py` solves linear elasticity on a regular grid
 of trilinear bricks, with SIMP-interpolated moduli `E_min + rho^p (E0 - E_min)` taken from the

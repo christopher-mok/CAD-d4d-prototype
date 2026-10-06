@@ -6,7 +6,69 @@ an adaptive run's fit divided by the fit of fixed uniform refinement at the same
 points, interpolated log-log along the uniform curve k = 0..5. Below 1 means adaptive is better at
 equal size.
 
-## 1. Held-out benchmark: 13 test targets (`experiments/benchmark.py --split test --tag v3`)
+![Benchmark targets](docs/images/targets.png)
+
+## 1. Closing the gap to uniform refinement (v4, current code)
+
+v3 left adaptive SRD behind uniform refinement on shapes with many small features spread over a
+boxy body (`a_super_bumps`, `a_super6_dents`, `a_many_bumps`). Diagnosis, in order:
+
+- **Not the simplifications or the per-round cap.** Turning simplifications off, lowering
+  `eps_remove` to 1e-3 and allowing 3 refinements per round left the fit unchanged or worse
+  (removals actually improve fit per control point), and the cap never bound.
+- **Refinements were starved.** After round 3 every FaceRefine cost 120-200 control points, its
+  predicted one-step gain was below its birth cost, and the cheap rewrites (carrier knots)
+  predicted almost nothing. SRD spent the remaining 16 rounds polishing and simplifying.
+- **The cause was the scoring metric.** `D = g^T M^{-1} g` used the lumped mass. For bicubic
+  patches the lumped mass overstates the mass of oscillatory control modes by up to ~1000x
+  (smallest eigenvalue of `diag(m)^{-1/2} M diag(m)^{-1/2}` is about 1e-3), and those are the
+  modes an exact refinement adds. Scoring with the consistent mass `G^T W G` fixes this. Steps
+  keep the lumped metric: consistent-mass *steps* sped up uniform fits ~3x but lost on grammar
+  targets (less local steps); all four step/score combinations were benchmarked.
+- **Optimizer stall (bug).** One face approaching a fold made every step add a self-intersection,
+  shrinking the global step to ~1e-14. Fixed by contact freezing: retry the step with that face's
+  DOFs frozen (`ContinuousConfig.freeze_contact`).
+- **Convergence caveat.** At the 800-step budget no method is converged; uniform k=1 on
+  `a_super_bumps` improves 3x with 1600 more steps and then beats k=2. Efficiency compares methods
+  at equal budget, not at convergence.
+
+13 held-out targets x 2 seeds, default lambda, 20 rounds x 40 steps + 200 polish. Each run is
+compared with uniform refinement run under the same code (`experiments/benchmark_out/v4_lumped`):
+
+| | v3 | **v4 default** | v4 + ResidualRefine |
+|---|---|---|---|
+| median efficiency | 0.52 | **0.44** | 0.42 |
+| runs better than uniform | 19/26 | **23/26** | 23/26 |
+| fit vs. v3, analytic targets (geometric mean) | 1 | **0.38** | 0.43 |
+| fit vs. v3, grammar targets (geometric mean) | 1 | 1.21 | 1.22 |
+
+![Efficiency per target](docs/images/efficiency_v3_v4.png)
+
+- **Weak targets**: `a_many_bumps` went from 1.4-2.7 to 0.89 (both seeds about 2.8e-6);
+  `a_super_bumps` from 1.3-1.9 to 0.46 and 0.14. `a_super6_dents` remains the hardest shape:
+  1.17 and 2.34.
+- **Median control-point saving** 1.35x (23 runs inside the uniform range).
+- **Grammar targets** lost a little: `g_mixed` (both seeds 1.7x worse) and `g_multi` seed 1;
+  `g_edges` improved 2x.
+- **ResidualRefine** (new grammar rule: knots at residual quantiles instead of bisection) ties
+  the default. It helps the superellipsoid family and hurts `g_multi`, so it stays opt-in.
+- **Single-target baseline** (section 3) is unchanged within seed noise.
+
+### Example fits
+
+Each figure: the target, uniform refinement with the closest control-point count, and SRD with
+v3 and v4 scoring (same seed, colored by distance to the target; black lines are patch
+boundaries, grey lines are knots). These are single runs, and GPU runs are not bit-reproducible:
+the aggregate above is the evidence, the pictures are illustrations. `a_super6_dents` is shown
+on an unfavorable draw where v4 lost.
+
+![a_super_bumps](docs/images/fit_a_super_bumps.png)
+![a_many_bumps](docs/images/fit_a_many_bumps.png)
+![a_ridge_bumps](docs/images/fit_a_ridge_bumps.png)
+![a_super6_dents](docs/images/fit_a_super6_dents.png)
+![g_multi](docs/images/fit_g_multi.png)
+
+## 2. Held-out benchmark v3 (`experiments/benchmark.py --split test --tag v3`)
 
 Targets:
 - **4 grammar targets**, reachable by construction: 1–4 interior and near-edge features, edge
@@ -73,26 +135,26 @@ Earlier tuning-set findings, still in the code:
 - the exact-SDF polish;
 - the crease penalty stays off: no consistent gain across seeds.
 
-## 2. Single-target baseline (`experiments/adaptive_refinement.py`)
+## 3. Single-target baseline (`experiments/adaptive_refinement.py`)
 
 The cube-sphere with one localized bump, as in the original specification. See
 `experiments/output/metrics.md`; `--record` writes `experiments/output/viewer.html`, an
-interactive replay of the method-C runs. Numbers for the final code:
+interactive replay of the method-C runs. Numbers for the v4 code:
 
 | method | fit (median of 3 seeds) | control pts | faces | total objective | runtime / run |
 |---|---|---|---|---|---|
-| fixed coarse | 1.54e-4 | 56 | 6 | 2.19e-4 | 17 s |
-| fixed uniform k=3 | 5.45e-6 | 218 | 6 | 2.34e-4 | 17 s |
-| adaptive, naive scoring (A) | 1.54e-4 (identical to coarse) | 56 | 6 | 2.19e-4 | 27 s |
-| adaptive, marginal, no birth cost (B) | 1.78e-6 (1.4e-6 - 7.6e-6) | 112 | 10 | 1.28e-4 | 54 s |
-| **adaptive, marginal + birth (C)** | **1.61e-6** (1.6e-6 - 3.0e-6) | **86** | 10 | **1.02e-4** | 41 s |
-| adaptive C, uniform proposals | 2.29e-6 | 124 | 10 | 1.40e-4 | 51 s |
+| fixed coarse | 1.54e-4 | 56 | 6 | 2.19e-4 | 18 s |
+| fixed uniform k=3 | 5.46e-6 | 218 | 6 | 2.34e-4 | 27 s |
+| adaptive, naive scoring (A) | 1.54e-4 (identical to coarse) | 56 | 6 | 2.19e-4 | 35 s |
+| adaptive, marginal, no birth cost (B) | 1.20e-6 (1.2e-6 - 1.5e-6) | 199 | 9 | 2.13e-4 | 58 s |
+| **adaptive, marginal + birth (C)** | **1.98e-6** (1.7e-6 - 2.4e-6) | **92** | 10 | **1.08e-4** | 55 s |
+| adaptive C, uniform proposals | 2.33e-6 | 126 | 10 | 1.43e-4 | 61 s |
 
-C has a 3.4x lower fit than uniform k=3 with 39% of its control points, and the best total
-objective. The worst of its three seeds, 3.0e-6, used to be an outlier at 1.2e-5 before the
-fixes in section 1. Naive scoring never refines; B over-refines and churns.
+Runtimes were measured with two other benchmark jobs sharing the GPU. C has a 2.8x lower fit than
+uniform k=3 with 42% of its control points, and the best total objective.
+Naive scoring never refines; B over-refines and churns.
 
-## 3. FEM: compliance-driven shape optimization (`experiments/compliance_shape.py`)
+## 4. FEM: compliance-driven shape optimization (`experiments/compliance_shape.py`)
 
 - **Setup**: a cantilever beam, a rounded box 2.8 × 0.9 × 0.9, clamped at its left end and loaded
   downward at the right tip.
@@ -113,7 +175,7 @@ tapering toward the loaded tip. The root also grips the support region better. G
 control points → proxy → soft occupancy → SIMP moduli → adjoint compliance; they are verified
 against finite differences in `tests/test_fem.py`.
 
-## 4. Performance
+## 5. Performance
 
 - **Device port**: 5-round SRD on the bump target went from 16.5 s (CPU) to 8.4 s (GPU), and the
   test suite from 78 s to 42 s, both measured before later additions.
