@@ -1,55 +1,139 @@
-# Baseline experiment: adaptive exact refinement
+# Results
 
-`python experiments/adaptive_refinement.py` (config `configs/adaptive_refinement.yaml`), on an
-RTX 4080 in float64. Every method gets the same continuous budget: 14 rounds x 40 steps = 560
-preconditioned steps. The SRD variants are stochastic (proposal sampling), so each runs with
-seeds 0, 1 and 2 and the table reports medians. The fixed baselines are deterministic.
+All numbers below come from an RTX 4080 in float64. `fit` is the exact narrow-band SDF² (area-weighted)
+plus coverage², evaluated on a dense sampling that is independent of the optimizer. *Efficiency* is
+an adaptive run's fit divided by the fit of fixed uniform refinement at the same number of control
+points, interpolated log-log along the uniform curve k = 0..5. Below 1 means adaptive is better at
+equal size.
 
-**Target.** A cube-sphere with an anisotropic global deformation, which the coarse model can
-represent, plus a localized bump, which it cannot. The bump is a LocalRefine on face 0 with its
-inner control points displaced by 0.25 along the normal. The generating program is discarded;
-the optimizer only sees the SDF grid (64^3) and 3000 coverage samples.
+## 1. Held-out benchmark: 13 test targets (`experiments/benchmark.py --split test --tag v3`)
 
-**Fit metric.** Exact narrow-band SDF^2 (area-weighted) + coverage^2, on a dense sampling
-independent of the optimizer. This is stricter than the trilinear-SDF numbers in earlier
-versions of this file.
+Targets:
+- **4 grammar targets**, reachable by construction: 1–4 interior and near-edge features, edge
+  ridges, and corner features.
+- **9 analytic targets**, outside the grammar: multi-bump spheres, superellipsoids (n = 4 and 6,
+  with and without dents), a tilted ridge, a low-frequency blob, a lobed ellipsoid, and 12 narrow
+  bumps.
 
-| method | fit (median) | fit range | control pts | faces | complexity | total objective | refinements | simplifications | runtime / run (s) |
-|---|---|---|---|---|---|---|---|---|---|
-| fixed coarse | 1.54e-04 | - | 56 | 6 | 62 | 2.19e-04 | - | - | 10.0 |
-| fixed uniform k=1 | 1.24e-04 | - | 98 | 6 | 104 | 2.32e-04 | - | - | 10.1 |
-| fixed uniform k=3 | 5.16e-06 | - | 218 | 6 | 224 | 2.34e-04 | - | - | 10.4 |
-| adaptive, naive scoring (A) | 1.54e-04 | 1.54e-04 - 1.54e-04 | 56 | 6 | 62 | 2.19e-04 | 0 | 0 | 21.8 |
-| adaptive, marginal, no birth cost (B) | 1.61e-06 | 1.33e-06 - 1.37e-05 | 174 | 21 | 195 | 2.00e-04 | 9 | 20 | 49.2 |
-| **adaptive, marginal + birth (C)** | **1.65e-06** | 1.61e-06 - 1.24e-05 | **85** | 10 | **95** | **1.01e-04** | 1 | 2 | 29.0 |
-| adaptive C, uniform proposals | 6.88e-06 | 1.55e-06 - 1.07e-05 | 95 | 11 | 106 | 1.23e-04 | 2 | 4 | 32.7 |
+Every method gets 20 rounds × 40 steps plus a 200-step exact-SDF polish.
 
-`total = fit + lambda_fair * fairness + lambda_complex * C(s)`, with
-`C = #faces + #control points` and `lambda_complex = 1e-6`.
+| adaptive (mode C) vs. uniform at equal size | v2 (before the fixes below) | **v3 (final)** |
+|---|---|---|
+| default λ = 1e-6, 3 seeds: median efficiency (runs better) | 1.18 (18/38) | **0.49 (28/39)** |
+| λ = 1e-7, 2 seeds | 1.44 (12/25) | **0.37 (20/24)** |
+| λ = 3e-8, 2 seeds | 1.14 (7/15) | **0.47 (19/20)** |
+| grammar targets, all λ | 0.21–0.31 | **0.24 (25/25)** |
+| analytic targets, all λ | 2.8–3.3 | **0.57 (42/58)** |
 
-## Representative run C (the median-fit seed; `events_C.json`, `exact_refinement_log.csv`)
+- **Control-point saving**: the median is 1.39×. That's how many more control points uniform
+  refinement needs to match the adaptive fit, over the runs inside the uniform curve's range.
+- **Beating uniform outright**: 20 of 91 adaptive runs reach a lower fit than the *finest* uniform
+  model (k = 5, 386 control points).
+- **Biggest reversal**: `a_superellipsoid` went from 9–47× *worse* than uniform (v2) to 0.53–0.75
+  (v3).
+- **Still weaker than uniform**:
+  - `a_many_bumps` at λ ≥ 1e-7: efficiency 1.4–2.7;
+  - `a_super6_dents` at λ ≥ 1e-7: efficiency 1.2–5.6;
+  - one seed of `a_super_bumps` at the default λ: efficiency 3.2.
 
-1. **Coarse stall.** By step 80 the fit has plateaued near 2e-4 and `D_old` = 4.9e-6.
-2. **Step 80: LocalRefine on the bump face, accepted.** The geometry is unchanged (exact).
-   `D_new` = 6.0e-4, so `B_refine` = 6.0e-4 and the predicted improvement `eta * B` is 3.0e-4,
-   against a birth cost of 3.3e-6. The naive immediate score for the same rewrite is -3.3e-5,
-   a rejection.
-3. **Realized vs. counterfactual.** 40 steps later the fit is 1.31e-5 with the rewrite and
-   1.90e-4 without it (same state and steps, no rewrite): 14x better.
-4. **Step 160: one KnotRemove** deletes a knot the bump did not need (85 -> 82 control points).
-5. **Proposal statistics.** Of 94 exact refinement proposals scored, all 94 naive immediate gains
-   were negative, and 89 got a negative score under C.
-6. **Final state.** A 3x better fit than uniform k=3, with 38% of its control points.
+  These shapes have many small features spread over a boxy body, so neither purely global nor
+  purely local refinement fits them well.
+- **One outlier**: `g_dense`, λ = 3e-8, seed 0 ended at 3.6e-5 with 655 control points; one target
+  region was never covered (max coverage distance 0.052). A rerun of the same configuration gave
+  3.0e-6 with 475 control points. GPU runs are not bit-reproducible: atomic `index_add` and sparse
+  products reorder floating-point sums, so trajectories diverge.
 
-## Observations and caveats
+Full per-target tables are in `experiments/benchmark_out/report_v3.md`; the interactive Pareto
+charts are in `experiments/benchmark_out/dashboard.html`.
 
-* **A (naive)** never accepts a refinement and ends identical to fixed coarse on every seed.
-* **B (no birth cost)** matches C's median fit but churns (9 refinements, 20 simplifications)
-  and ends with 2x the control points. Its total objective is twice C's.
-* **Seed sensitivity.** Seed 0 is an outlier for B and C (fit ~1.3e-5). Hypothesis, not
-  verified for this exact run: in earlier seed-0 runs the first accepted LocalRefine window was
-  centered off the bump (u ~ 0.75 vs. the bump at 0.5), and later refinements only partly
-  compensated. More rounds, or lookahead on the shortlist, are the obvious levers.
-* **Uniform proposal sampling** is more variable (1.6e-6 to 1.1e-5) than residual-guided
-  sampling.
-* Three seeds and one target demonstrate the mechanism. They do not establish significance.
+### What changed between v2 and v3 (found with the benchmark)
+
+1. **Optimizer freeze (bug).** A rewrite re-samples the validity-check tessellation. That can
+   reveal a small fold that already existed, and every later step inherited it, so the absolute
+   "no self-intersection" rule rejected all motion: `a_ridge_bumps` ended *worse than the coarse
+   model*. Fixed with a monotone rule (a step may not add intersections) plus an SRD acceptance
+   gate. That run goes from 1.3e-4 with 536 control points to 1.7e-5 with 139.
+2. **Discontinuous coverage loss (bug).** Closest-triangle candidates came from the 6 nearest
+   centroids in a float32 search. That missed large triangles and broke near-ties by rounding
+   noise, trapping Armijo at step sizes around 1e-13. Fixed with centroid + vertex-star candidates
+   in float64.
+3. **Step size carried across rewrites** (fixed: it now resets after accepted rewrites).
+4. **Myopic window commitment (policy).** On globally smooth misfit, local windows have the best
+   *immediate* gain per DOF, and SRD never recovered the face-wide refinement it needed. An exact
+   split applied to a converged model still improves it, which rules out an optimization
+   pathology. The fix is the **residual-adaptive scale**: when the residual is spread (area holding
+   half its energy > 0.04, a threshold set on the tuning targets only), propose global refinements;
+   otherwise local windows.
+
+Earlier tuning-set findings, still in the code:
+- boundary refinement for LocalRefine windows (the window seams held 60% of the error on smooth
+  shapes);
+- FaceRefine;
+- ratio (gain per DOF) ranking;
+- the exact-SDF polish;
+- the crease penalty stays off: no consistent gain across seeds.
+
+## 2. Single-target baseline (`experiments/adaptive_refinement.py`)
+
+The cube-sphere with one localized bump, as in the original specification. See
+`experiments/output/metrics.md`; `--record` writes `experiments/output/viewer.html`, an
+interactive replay of the method-C runs. Numbers for the final code:
+
+| method | fit (median of 3 seeds) | control pts | faces | total objective | runtime / run |
+|---|---|---|---|---|---|
+| fixed coarse | 1.54e-4 | 56 | 6 | 2.19e-4 | 17 s |
+| fixed uniform k=3 | 5.45e-6 | 218 | 6 | 2.34e-4 | 17 s |
+| adaptive, naive scoring (A) | 1.54e-4 (identical to coarse) | 56 | 6 | 2.19e-4 | 27 s |
+| adaptive, marginal, no birth cost (B) | 1.78e-6 (1.4e-6 - 7.6e-6) | 112 | 10 | 1.28e-4 | 54 s |
+| **adaptive, marginal + birth (C)** | **1.61e-6** (1.6e-6 - 3.0e-6) | **86** | 10 | **1.02e-4** | 41 s |
+| adaptive C, uniform proposals | 2.29e-6 | 124 | 10 | 1.40e-4 | 51 s |
+
+C has a 3.4x lower fit than uniform k=3 with 39% of its control points, and the best total
+objective. The worst of its three seeds, 3.0e-6, used to be an outlier at 1.2e-5 before the
+fixes in section 1. Naive scoring never refines; B over-refines and churns.
+
+## 3. FEM: compliance-driven shape optimization (`experiments/compliance_shape.py`)
+
+- **Setup**: a cantilever beam, a rounded box 2.8 × 0.9 × 0.9, clamped at its left end and loaded
+  downward at the right tip.
+- **Mesh and solve**: a fixed 31 × 12 × 12-cell grid with 16k DOFs, solved by Jacobi-PCG on the
+  GPU.
+- **Objective**: normalized compliance plus a volume penalty asking for 80% of the initial volume.
+- **Run**: 150 continuous steps, 22 s.
+
+| | volume | compliance |
+|---|---|---|
+| initial beam | 1.00 V0 | 1.00 C0 |
+| uniform scaling to 0.8 V0 (naive baseline) | 0.80 V0 | 3.38 C0 |
+| **optimized** | **0.81 V0** | **0.34 C0** |
+
+The optimized beam is **10× stiffer** than naive scaling at the same volume. Its shape is the
+classic optimal cantilever: deep at the clamped root, where the bending moment is largest,
+tapering toward the loaded tip. The root also grips the support region better. Gradients flow
+control points → proxy → soft occupancy → SIMP moduli → adjoint compliance; they are verified
+against finite differences in `tests/test_fem.py`.
+
+## 4. Performance
+
+- **Device port**: 5-round SRD on the bump target went from 16.5 s (CPU) to 8.4 s (GPU), and the
+  test suite from 78 s to 42 s, both measured before later additions.
+- **Code-review fixes**, hot paths, old vs. new implementation on identical inputs:
+
+| hot path | old | new | speedup |
+|---|---|---|---|
+| sparse vs. dense Kronecker products for sample operators | 35.7 ms | 22.5 ms | 1.6× |
+| DOF-map face rows (cached run matrices) | 51.5 ms | 22.7 ms | 2.3× |
+| state copy + DOF-map access (map reused) | 4.1 ms | 1.4 ms | 2.9× |
+| scoring one exact refinement (one forward pass fewer) | 323 ms | 276 ms | 1.2× |
+| continuous step with 6 backtracking trials (self-intersection test last) | 258 ms | 224 ms | 1.2× |
+| face refit for KnotRemove/MergeFace (separable least squares) | 1.2 ms | 0.9 ms | 1.3× |
+
+- **End to end** (same harness, same 33 runs, v1 → v2): 1.13× for adaptive runs, 1.34× for fixed
+  runs. v1 was partly slowed by concurrent CPU test runs, so the fixed-run figure is an upper bound.
+- **Cost of the robust distance search**: the float64 centroid + star candidates made coverage
+  costlier. Fixed uniform runs took 1.9× longer in total in v3 than in v2 (2866 s vs. 1526 s);
+  adaptive runs were almost unchanged (median 65 s vs. 68 s per run). A two-stage search fixed this: a float32 search over-fetches 2k
+  candidates, and exact float64 distances re-rank them. Coverage evaluation went from 15.9 ms to
+  6.7 ms and loss + gradient from 25 to 15 ms. Uniform k=3 / k=5 runs are back to 20 s / 31 s
+  (v2: 18 s / 26 s; v3: 32 s / 54 s), with identical fits. Continuity was verified: 200 random
+  1e-9 perturbations of a refined, merged structure change the loss by at most 1.6e-11.

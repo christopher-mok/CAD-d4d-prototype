@@ -27,7 +27,7 @@ uploaded once.
 
 ```bash
 pip install -e .[test]            # numpy, scipy, torch, matplotlib, pyyaml, pytest
-python -m pytest                  # 92 tests, ~1 min on GPU (CAD_D4D_DEVICE=cpu: ~3 min)
+python -m pytest                  # 93 tests, ~45 s on GPU (CAD_D4D_DEVICE=cpu: ~3 min)
 python experiments/adaptive_refinement.py [--record]   # single-target baseline, 3 SRD seeds (~10 min)
 python experiments/benchmark.py --split test --tag v2 --report --dashboard   # 13-target benchmark
 python experiments/compliance_shape.py                 # FEM: compliance-driven cantilever (~1 min)
@@ -192,6 +192,46 @@ their common seam.
 units. Bending energy (and its preconditioned gradient) on thin slivers is stiff, which made
 first-order marginal scores meaningless there.
 
+**Refinement policy for complex shapes.** These additions came out of the multi-target
+benchmark:
+- *Boundary refinement*: LocalRefine can also refine the carriers that bound its window,
+  removing the coarse seam around each window.
+- *FaceRefine*: bisects every knot span of a face, carriers included.
+- *Ratio ranking*: candidates are ranked by predicted gain per added complexity unit.
+- *Exact-SDF polish*: a final continuous phase against the exact narrow-band SDF.
+- *Residual-adaptive scale*: the first-order score is myopic. A local window has the highest
+  immediate gain per DOF, so on a globally smooth misfit (a superellipsoid fitted from a
+  sphere) SRD committed to windows early and plateaued about 10x above FaceRefine-only. It is
+  path dependence, not an optimization pathology: an exact split applied to a converged model
+  keeps improving. Each discrete phase therefore measures the *residual spread*, the smallest
+  surface fraction holding half of the residual energy. If it exceeds 0.04, only global
+  refinements are proposed (FaceRefine, CarrierKnotInsert). Concentrated residuals get local
+  windows. The threshold is the geometric mean of the two tuning targets' spreads (0.013 vs.
+  0.127); the 13 test targets split at 0.021 (grammar) / 0.054 (analytic).
+
+**Robust closest-triangle search.** Coverage and occupancy distances minimize over candidate
+triangles: the k nearest centroids plus the stars of the nearest proxy vertices, searched in
+float64. Centroids alone miss large triangles next to small ones, and a float32 search resolves
+near-ties by rounding noise. Together these made the loss discontinuous, which trapped the
+line search at step sizes around 1e-13.
+
+**Monotone validity.** A trial step is rejected if it *adds* self-intersections, not if any
+exist. A rewrite that re-samples the check tessellation can reveal a pre-existing small fold;
+under the absolute rule every later step inherited it and the optimizer froze for the rest of
+the run. SRD also refuses rewrites whose new structure shows more intersections than the
+parent. The continuous step size is reset after accepted rewrites.
+
+**FEM (fixed-grid compliance).** `physics/fem.py` solves linear elasticity on a regular grid
+of trilinear bricks, with SIMP-interpolated moduli `E_min + rho^p (E0 - E_min)` taken from the
+soft occupancy of the B-spline solid. It is matrix-free with Jacobi-preconditioned CG on the
+device, warm-started between evaluations. Compliance `C = f.u` has adjoint gradients
+`dC/dE_e = -u_e^T K0 u_e` (self-adjoint, so no second solve) that chain through occupancy to
+the control points. `ComplianceTerm` plugs into `ObjectiveConfig.physics`, so the continuous
+optimizer, SRD scoring and the viewer work unchanged. Validation: a bar in tension matches
+`sigma L / E` to machine precision, and compliance gradients match finite differences both with
+respect to densities and with respect to control points. Note: on symmetric setups, grid
+points on the shape's medial axis have non-differentiable distances (tied closest points).
+
 ## Tests (by milestone)
 
 | file | invariant |
@@ -207,7 +247,12 @@ first-order marginal scores meaningless there.
 | test_srd | SRD beats fixed coarse; naive never refines; an unused refinement is removed after the grace period |
 | test_carrier_and_crease | CarrierKnotInsert exact (also with hanging vertices), round trip and gating; crease penalty zero after split, keeps unused splits mergeable |
 | test_occupancy | winding number, exact volume and its gradient, signed distance, soft-occupancy volume/gradient consistency, invariance under exact rewrites, volume loss |
+| test_fem | element stiffness (symmetric, 6 rigid modes), exact bar solution, compliance gradient vs. FD (densities and control points), compliance-driven shape optimization |
+| test_benchmark | analytic/grammar target generators, comparison math |
+| test_viewer | recorder frames/structures/events, safe HTML embedding |
+| test_review_fixes | separable refit = dense LS, no double birth-record charge, DOF map reuse on copy, monotone self-intersection rule |
 
 ## Results
 
-See `experiments/output/metrics.md` after running the experiment (summarized in RESULTS.md).
+`RESULTS.md` summarizes the single-target baseline, the 13-target held-out benchmark, the FEM
+demo and the performance checks.

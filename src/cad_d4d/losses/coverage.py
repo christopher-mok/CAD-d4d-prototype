@@ -26,11 +26,18 @@ def nearest_centroids(Y: torch.Tensor, cent: torch.Tensor, k: int, chunk: int = 
     """Indices (len(Y), k) of the k nearest points of ``cent`` to every query (float64, exact)."""
     k = min(k, len(cent))
     if cent.is_cuda:
+        # Two-stage search: a float32 pass over-fetches 2k candidates (fast), then exact
+        # float64 distances re-rank them. float32 rounding only perturbs near-ties, so the
+        # exact top-k lies inside the 2k superset; ranking is then deterministic in float64.
         c = cent.detach()
+        c32 = c.float()
+        k2 = min(2 * k, len(c))
         out = []
         for s in range(0, len(Y), chunk):
-            d = torch.cdist(Y[s: s + chunk].detach(), c)
-            out.append(d.topk(k, dim=1, largest=False).indices)
+            y = Y[s: s + chunk].detach()
+            cand = torch.cdist(y.float(), c32).topk(k2, dim=1, largest=False).indices
+            d = ((c[cand] - y[:, None, :]) ** 2).sum(-1)
+            out.append(cand.gather(1, d.topk(k, dim=1, largest=False).indices))
         return torch.cat(out)
     _, nn = cKDTree(cent.detach().cpu().numpy()).query(Y.detach().cpu().numpy(), k=k, workers=-1)
     return torch.as_tensor(np.asarray(nn).reshape(len(Y), k), device=Y.device)
