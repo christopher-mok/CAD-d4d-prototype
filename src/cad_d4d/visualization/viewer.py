@@ -218,16 +218,21 @@ def save_state_figure(state: CADState, target, path: str, proposals=None, title:
     fig = plt.figure(figsize=(15, 5.4))
     fig.suptitle(title, fontsize=11, color=INK)
     ax1 = fig.add_subplot(1, 3, 1, projection="3d")
-    plot_target(ax1, target, "target (ground-truth patch layout)", view=view)
+    if target is not None:
+        plot_target(ax1, target, "target (ground-truth patch layout)", view=view)
+    else:
+        plot_state(ax1, state, None, residual=False, show_net=False, show_points=False,
+                   highlight_refined=False, title="surface", view=view)
     ax2 = fig.add_subplot(1, 3, 2, projection="3d")
     plot_state(ax2, state, target, residual=False, show_net=True, show_points=True, proposals=proposals,
                title="patches + control net (orange: refined faces)", view=view)
     ax2.legend(loc="lower left", fontsize=7)
     ax3 = fig.add_subplot(1, 3, 3, projection="3d")
-    plot_state(ax3, state, target, residual=True, show_net=False, show_points=False,
-               title="residual |phi_target| on the surface", view=view)
-    sm = plt.cm.ScalarMappable(cmap=SEQ, norm=plt.Normalize(0, getattr(ax3, "_residual_vmax", 1.0)))
-    fig.colorbar(sm, ax=ax3, shrink=0.6, pad=0.02, label="|phi| (capped at 99th percentile)")
+    plot_state(ax3, state, target, residual=target is not None, show_net=False, show_points=False,
+               title="residual |phi_target| on the surface" if target is not None else "refined faces", view=view)
+    if target is not None:
+        sm = plt.cm.ScalarMappable(cmap=SEQ, norm=plt.Normalize(0, getattr(ax3, "_residual_vmax", 1.0)))
+        fig.colorbar(sm, ax=ax3, shrink=0.6, pad=0.02, label="|phi| (capped at 99th percentile)")
     fig.tight_layout()
     fig.savefig(path, dpi=130)
     plt.close(fig)

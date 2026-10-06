@@ -87,6 +87,7 @@ class OccupancyGrid:
     def __init__(self, lo, hi, res: int, device=None, dtype=torch.float64):
         lo = torch.as_tensor(lo, dtype=dtype, device=device)
         hi = torch.as_tensor(hi, dtype=dtype, device=device)
+        self.lo = lo
         self.h = float((hi - lo).max()) / res
         dims = torch.ceil((hi - lo) / self.h).long().clamp(min=1)
         self.dims = tuple(int(d) for d in dims)

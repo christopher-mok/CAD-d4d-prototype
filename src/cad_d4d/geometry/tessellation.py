@@ -53,7 +53,7 @@ class SurfaceSampler:
         cx = state.cx
         self.face_order = list(dm.face_order)
         G_blocks, Gu_blocks, Gv_blocks = [], [], []
-        tris, tri_face, tri_cell, tri_bnd = [], [], [], []
+        tris, tri_face, tri_cell = [], [], []
         sample_face, sample_uv, quad_w, sample_bnd = [], [], [], []
         self.face_slices: dict[int, tuple[int, int, int]] = {}
         off = 0
@@ -64,9 +64,10 @@ class SurfaceSampler:
             Bu, dBu = basis(f.knots_u, f.degree_u, us), basis(f.knots_u, f.degree_u, us, 1)
             Bv, dBv = basis(f.knots_v, f.degree_v, vs), basis(f.knots_v, f.degree_v, vs, 1)
             R = dm.face_rows(fid)
-            G_blocks.append(sp.csr_matrix(np.kron(Bu, Bv)) @ R)
-            Gu_blocks.append(sp.csr_matrix(np.kron(dBu, Bv)) @ R)
-            Gv_blocks.append(sp.csr_matrix(np.kron(Bu, dBv)) @ R)
+            sBu, sBv, sdBu, sdBv = (sp.csr_matrix(M) for M in (Bu, Bv, dBu, dBv))
+            G_blocks.append(sp.kron(sBu, sBv, format="csr") @ R)
+            Gu_blocks.append(sp.kron(sdBu, sBv, format="csr") @ R)
+            Gv_blocks.append(sp.kron(sBu, sdBv, format="csr") @ R)
             self.face_slices[fid] = (off, nu_s, nv_s)
             U, V = np.meshgrid(us, vs, indexing="ij")
             sample_uv.append(np.stack([U.ravel(), V.ravel()], 1))
@@ -84,8 +85,6 @@ class SurfaceSampler:
             tris.append(np.concatenate([np.stack([a, b, c], 1), np.stack([a, c, d], 1)]))
             cell = np.stack([I, J], 1)
             tri_cell.append(np.concatenate([cell, cell]))
-            bnd = (I == 0) | (J == 0) | (I == nu_s - 2) | (J == nv_s - 2)
-            tri_bnd.append(np.concatenate([bnd, bnd]))
             tri_face.append(np.full(2 * len(I), k))
             off += nu_s * nv_s
         self.n_samples = off
@@ -98,7 +97,6 @@ class SurfaceSampler:
         self.tri = np.concatenate(tris)
         self.tri_face = np.concatenate(tri_face)
         self.tri_cell = np.concatenate(tri_cell)
-        self.tri_boundary = np.concatenate(tri_bnd)
         self.sample_face = np.concatenate(sample_face)
         self.sample_uv = np.concatenate(sample_uv)
         self.sample_boundary = np.concatenate(sample_bnd)
@@ -117,11 +115,6 @@ class SurfaceSampler:
 
     def evaluate_np(self, P: np.ndarray):
         return self.G_np @ P, self.Gu_np @ P, self.Gv_np @ P
-
-    def face_grid(self, fid: int, X):
-        off, nu, nv = self.face_slices[fid]
-        return X[off: off + nu * nv].reshape(nu, nv, -1)
-
 
 def export_obj(path, X: np.ndarray, tri: np.ndarray) -> None:
     with open(path, "w") as fh:

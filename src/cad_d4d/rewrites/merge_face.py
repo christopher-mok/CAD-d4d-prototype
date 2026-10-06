@@ -158,8 +158,10 @@ class MergeFace(Rewrite):
             except TopologyError:
                 continue
             # validation breakpoints: the merged knots plus the removed C0 knot tau
-            us = validation_params(np.sort(np.concatenate([merged.knots_u, [tau] if axis == "u" else []])), 3)
-            vs = validation_params(np.sort(np.concatenate([merged.knots_v, [tau] if axis == "v" else []])), 3)
+            us = validation_params(np.sort(np.concatenate([merged.knots_u, [tau] if axis == "u" else []])),
+                                   merged.degree_u)
+            vs = validation_params(np.sort(np.concatenate([merged.knots_v, [tau] if axis == "v" else []])),
+                                   merged.degree_v)
             U, V = np.meshgrid(us, vs, indexing="ij")
             Y = old_eval(np.stack([U.ravel(), V.ravel()], 1)).reshape(len(us), len(vs), 3)
             state.structure_changed()

@@ -10,6 +10,8 @@ over a dense validation grid. Fails if the knot is required by invariant I1
 """
 from __future__ import annotations
 
+import copy
+
 import numpy as np
 
 from ..geometry import bspline_basis as bb
@@ -55,7 +57,6 @@ class KnotRemove(Rewrite):
             return RewriteOutcome(None, "face missing")
         f = cx.faces[self.face]
         knots = f.knots_u if self.axis == "u" else f.knots_v
-        p = f.degree_u if self.axis == "u" else f.degree_v
         if not (bb.KNOT_TOL < self.t < 1 - bb.KNOT_TOL) or bb.multiplicity(knots, self.t) == 0:
             return RewriteOutcome(None, "not an interior knot")
         i = int(np.argmax(np.abs(knots - self.t) <= bb.KNOT_TOL))
@@ -88,10 +89,29 @@ class KnotRemove(Rewrite):
         return RewriteOutcome(state, deviation=dev, info={"modified_faces": [self.face]})
 
 
+def removal_allowed(cx, f, axis: str, t: float) -> bool:
+    """Whether removing one copy of knot t keeps invariant I1 on the sides along ``axis``."""
+    trial = copy.copy(f)
+    knots = f.knots_u if axis == "u" else f.knots_v
+    reduced = np.delete(knots, int(np.argmax(np.abs(knots - t) <= bb.KNOT_TOL)))
+    if axis == "u":
+        trial.knots_u = reduced
+    else:
+        trial.knots_v = reduced
+    try:
+        for side in (("v0", "v1") if axis == "u" else ("u0", "u1")):
+            cx.check_side_refinement(trial, side)
+    except TopologyError:
+        return False
+    return True
+
+
 def knot_remove_candidates(state: CADState, eps: float) -> list[KnotRemove]:
+    """Interior knots whose removal is structurally allowed (I1); the epsilon gate is checked on apply."""
     out = []
     for fid, f in state.cx.faces.items():
         for axis, knots, p in (("u", f.knots_u, f.degree_u), ("v", f.knots_v, f.degree_v)):
             for t in np.unique(np.round(bb.interior_knots(knots, p), 12)):
-                out.append(KnotRemove(fid, axis, float(t), eps))
+                if removal_allowed(state.cx, f, axis, float(t)):
+                    out.append(KnotRemove(fid, axis, float(t), eps))
     return out

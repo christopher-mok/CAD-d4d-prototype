@@ -17,7 +17,6 @@ the dense result mesh. Independent of the optimizer's own quadrature.
 """
 from __future__ import annotations
 
-import copy
 import dataclasses
 import json
 import math
@@ -31,7 +30,6 @@ from ..device import to_numpy, to_tensor
 from ..geometry.builders import build_cube_complex, sphere_map
 from ..geometry.state import CADState, watertightness_error
 from ..geometry.tessellation import SamplingConfig, SurfaceSampler
-from ..losses.complexity import ComplexityConfig
 from ..losses.coverage import coverage_distances
 from ..losses.objective import ObjectiveConfig, ShapeObjective
 from ..optimization.continuous import ContinuousConfig, ContinuousOptimizer
@@ -62,6 +60,7 @@ class MethodSpec:
     srd: dict = field(default_factory=dict)        # SRDConfig overrides
     proposals: dict = field(default_factory=dict)  # ProposalConfig overrides
     disc: dict = field(default_factory=dict)       # DiscretizationConfig overrides (e.g. crease_weight)
+    rank_by: str = "ratio"                         # refinement ranking (ScoringConfig.rank_by)
 
     def key(self) -> str:
         return json.dumps(dataclasses.asdict(self), sort_keys=True)
@@ -83,7 +82,7 @@ def initial_radius(target) -> float:
 
 
 def objective_for(target, method: MethodSpec, base_cfg: ObjectiveConfig | None = None) -> ShapeObjective:
-    cfg = copy.deepcopy(base_cfg or ObjectiveConfig())
+    cfg = dataclasses.replace(base_cfg or ObjectiveConfig())
     if method.disc:
         cfg.discretization = dataclasses.replace(cfg.discretization, **method.disc)
     if method.lambda_complex is not None:
@@ -107,7 +106,8 @@ def run_method(target, method: MethodSpec, budget: Budget, base_cfg: ObjectiveCo
         pcfg = dataclasses.replace(ProposalConfig(), **method.proposals)
         scfg = SRDConfig(rounds=budget.rounds, steps_per_round=budget.steps_per_round, seed=method.seed,
                          polish_steps=budget.polish_steps,
-                         scoring=ScoringConfig(mode=method.mode), proposals=pcfg, **method.srd)
+                         scoring=ScoringConfig(mode=method.mode, rank_by=method.rank_by),
+                         proposals=pcfg, **method.srd)
         res = SRD(obj, scfg).run(state)
         state, events = res.state, res.events
     else:

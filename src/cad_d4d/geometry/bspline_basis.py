@@ -241,6 +241,16 @@ def insertion_matrix(knots: np.ndarray, degree: int, t: float):
     return A, new_knots
 
 
+def insert_times(knots: np.ndarray, degree: int, t: float, times: int):
+    """Insert ``t`` ``times`` times. Returns ``(A, new_knots)`` with ``P_new = A @ P_old``."""
+    A = np.eye(num_basis(knots, degree))
+    k = np.asarray(knots, dtype=float)
+    for _ in range(times):
+        Ai, k = insertion_matrix(k, degree, t)
+        A = Ai @ A
+    return A, k
+
+
 def refinement_matrix(knots_old: np.ndarray, knots_new: np.ndarray, degree: int) -> np.ndarray:
     """Linear map from control points on ``knots_old`` to ``knots_new`` (a superset)."""
     knots_old = np.asarray(knots_old, dtype=float)

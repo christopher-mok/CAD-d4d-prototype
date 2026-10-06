@@ -17,7 +17,7 @@ import torch
 from ..device import to_tensor
 from ..geometry.state import CADState
 from ..geometry.tessellation import SamplingConfig, SurfaceSampler
-from ..geometry.validity import ValidityConfig, jacobian_check, self_intersections
+from ..geometry.validity import ValidityConfig, jacobian_check
 from ..losses.target_sdf import SDFGrid
 
 

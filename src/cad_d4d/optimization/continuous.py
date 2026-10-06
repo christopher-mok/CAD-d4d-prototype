@@ -2,15 +2,19 @@
 
     p <- p - eta * M^{-1} grad_p L_smooth
 
-with a lumped-mass diagonal M, Armijo sufficient decrease, and geometric
-validity backtracking (degenerate Jacobian, orientation flip, nonlocal
-self-intersection). No Adam: plain preconditioned gradient descent.
+with the preconditioner M of ``preconditioner.Preconditioner`` (default:
+semi-implicit lumped mass + fairness Hessian), Armijo sufficient decrease and
+geometric validity backtracking (degenerate Jacobian, orientation flip,
+nonlocal self-intersection). No Adam: plain preconditioned gradient descent.
+
+Backtracking order per trial step: Jacobian/orientation check (cheap), Armijo
+test, then the self-intersection test (expensive) only for steps that would
+otherwise be accepted.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-import numpy as np
 import torch
 
 from ..device import to_numpy, to_tensor
@@ -72,17 +76,18 @@ class ContinuousOptimizer:
         terms = {k: (v.detach() if torch.is_tensor(v) else v) for k, v in terms.items()}
         return GradientInfo(terms, g, pc)
 
-    def descent_capacity(self, state: CADState) -> float:
-        return self.gradient(state).descent_capacity
-
     # -- validity ----------------------------------------------------------
-    def is_valid(self, disc: Discretization, P: torch.Tensor, ref_normals: torch.Tensor | None):
+    def is_valid(self, disc: Discretization, P: torch.Tensor, ref_normals: torch.Tensor | None,
+                 local: bool = True, nonlocal_: bool = True):
+        """Validity of the configuration P: ``local`` = Jacobian/orientation, ``nonlocal_`` = self-intersection."""
         vc = self.cfg.validity
         with torch.no_grad():
             X, Xu, Xv = disc.check.evaluate(to_tensor(P))
-            ok, info = jacobian_check(Xu, Xv, disc.check.sample_face_t, ref_normals, vc.eps_jacobian_rel,
-                                      vc.check_orientation)
-            if ok and vc.check_self_intersection:
+            ok, info = True, {}
+            if local:
+                ok, info = jacobian_check(Xu, Xv, disc.check.sample_face_t, ref_normals, vc.eps_jacobian_rel,
+                                          vc.check_orientation)
+            if ok and nonlocal_ and vc.check_self_intersection:
                 n_hit = disc.count_self_intersections(X)
                 info["n_self_intersections"] = n_hit
                 ok = n_hit == 0
@@ -107,13 +112,16 @@ class ContinuousOptimizer:
                "fair": float(gi.terms["fair"]), "D": gd, "backtracks": 0, "invalid": 0}
         for k in range(cfg.max_backtracks):
             P_try = P.detach() - t * d
-            ok, info = self.is_valid(disc, P_try, ref)
+            ok, _ = self.is_valid(disc, P_try, ref, local=True, nonlocal_=False)
             if ok:
                 with torch.no_grad():
                     L1 = float(self.obj.terms(state, P_try, disc)["smooth"])
                 if L1 <= L0 - cfg.armijo_c * t * gd:
-                    log.update(eta=t, new_loss=L1, backtracks=k)
-                    return P_try, log
+                    ok, _ = self.is_valid(disc, P_try, ref, local=False, nonlocal_=True)
+                    if ok:
+                        log.update(eta=t, new_loss=L1, backtracks=k)
+                        return P_try, log
+                    log["invalid"] += 1
             else:
                 log["invalid"] += 1
             t *= 0.5
@@ -134,13 +142,13 @@ class ContinuousOptimizer:
                 r.age += 1
             logs.append(log)
             if callback:
-                callback(it, log)
+                callback(it, log, P if P_new is None else P_new)
             if P_new is None:
                 failures += 1
                 if failures >= cfg.max_failed_steps:
                     eta = cfg.eta  # stalled: restart the next phase from the nominal step
                     break
-                eta *= 0.5**cfg.max_backtracks
+                eta *= 0.5  # the next step backtracks from here again (a tiny restart would cost ~30 steps to regrow)
                 continue
             failures = 0
             P = P_new

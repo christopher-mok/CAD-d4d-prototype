@@ -32,19 +32,20 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from cad_d4d.device import get_device, to_numpy, to_tensor  # noqa: E402
+from cad_d4d.benchmark.runner import exact_metrics  # noqa: E402
+from cad_d4d.device import get_device  # noqa: E402
 from cad_d4d.geometry.builders import build_cube_complex  # noqa: E402
 from cad_d4d.geometry.state import watertightness_error  # noqa: E402
-from cad_d4d.geometry.tessellation import SamplingConfig, SurfaceSampler  # noqa: E402
 from cad_d4d.losses.complexity import ComplexityConfig, structural_complexity  # noqa: E402
-from cad_d4d.losses.coverage import coverage_distances  # noqa: E402
 from cad_d4d.losses.objective import ObjectiveConfig, ShapeObjective  # noqa: E402
 from cad_d4d.optimization.continuous import ContinuousConfig, ContinuousOptimizer  # noqa: E402
 from cad_d4d.optimization.proposal_sampling import ProposalConfig  # noqa: E402
 from cad_d4d.optimization.rewrite_scoring import ScoringConfig  # noqa: E402
 from cad_d4d.optimization.srd import SRD, SRDConfig  # noqa: E402
 from cad_d4d.targets.synthetic import TargetConfig, localized_bump_target, scale_dofs  # noqa: E402
+from cad_d4d.visualization.recording import Recorder  # noqa: E402
 from cad_d4d.visualization.viewer import plot_comparison, plot_history, save_state_figure, view_toward  # noqa: E402
+from cad_d4d.visualization.web import write_html  # noqa: E402
 
 
 def load_config(path: Path, quick: bool) -> dict:
@@ -60,15 +61,8 @@ def load_config(path: Path, quick: bool) -> dict:
 
 def independent_metrics(state, target) -> dict:
     """Fit measured on a dense, method-independent sampling (not the optimizer's quadrature)."""
-    sm = SurfaceSampler(state, SamplingConfig(min_res=33, per_span=8, max_res=65))
-    X, Xu, Xv = sm.evaluate_np(state.values())
-    area = np.linalg.norm(np.cross(Xu, Xv), axis=1) * to_numpy(sm.quad_w)
-    w = area / area.sum()
-    phi = to_numpy(target.sdf(X, exact=True))  # exact narrow-band distance for reporting
-    d, _ = coverage_distances(target.points, to_tensor(X), sm.tri_t)
-    d = to_numpy(d)
-    return {"sdf_rms": float(np.sqrt(np.sum(w * phi**2))), "coverage_rms": float(np.sqrt(np.mean(d**2))),
-            "coverage_max": float(d.max()), "fit_dense": float(np.sum(w * phi**2) + np.mean(d**2))}
+    m = exact_metrics(state, target)
+    return {"sdf_rms": m["sdf_rms"], "coverage_rms": m["cov_rms"], "coverage_max": m["cov_max"], "fit_dense": m["fit"]}
 
 
 def summarize(name, state, obj, runtime, events=(), extra=None) -> dict:
@@ -93,6 +87,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", default=str(ROOT / "configs" / "adaptive_refinement.yaml"))
     ap.add_argument("--quick", action="store_true", help="short smoke run")
+    ap.add_argument("--record", action="store_true", help="record the method-C runs for the replay viewer")
     args = ap.parse_args()
     cfg = load_config(Path(args.config), args.quick)
     out_dir = ROOT / cfg["output_dir"]
@@ -149,6 +144,7 @@ def main():
                 ("adaptive marginal + birth (C)", "marginal_birth", "residual"),
                 ("adaptive C, uniform proposals", "marginal_birth", "uniform")]
     seeds = cfg.get("srd_seeds", [cfg["seed"]])
+    recordings = []
     per_seed: dict[str, list] = {}
     for name, mode, pmode in variants:
         runs = []
@@ -158,7 +154,11 @@ def main():
                            proposals=ProposalConfig(mode=pmode, n_refine=pc["n_refine"], n_simplify=pc["n_simplify"],
                                                     eps_remove=pc["eps_remove"], eps_merge=pc["eps_merge"]),
                            **cfg["srd"])
-            res = SRD(obj, sc).run(base)
+            record = args.record and mode == "marginal_birth" and pmode == "residual"
+            rec = Recorder(target, every=5, name=f"{name} | seed {seed}") if record else None
+            res = SRD(obj, sc).run(base, recorder=rec)
+            if rec is not None:
+                recordings.append(rec.to_dict())
             summ = summarize(name, res.state, obj, res.runtime, res.events, {"seed": seed})
             runs.append((summ, res))
             print(f"[{name} | seed {seed}] fit_dense={summ['fit_dense']:.3e} cp={res.state.n_control_points} "
@@ -220,6 +220,9 @@ def main():
         props = srd_runs[name].proposals if name in srd_runs else None
         slug = name.replace(" ", "_").replace("(", "").replace(")", "").replace(",", "").replace("=", "")
         save_state_figure(st, target, str(out_dir / f"state_{slug}.png"), proposals=props, title=name, view=view)
+    if recordings:
+        out = write_html(out_dir / "viewer.html", recordings, title="D4D adaptive refinement runs")
+        print(f"interactive replay: {out}")
     print(f"\nwrote outputs to {out_dir}")
 
 

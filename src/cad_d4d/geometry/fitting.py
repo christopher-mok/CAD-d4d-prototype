@@ -36,16 +36,18 @@ def fit_face_interior(cx: PatchComplex, fid: int, us, vs, target_grid: np.ndarra
     nu, nv = f.shape
     Bu = bb.basis_matrix(f.knots_u, f.degree_u, us)
     Bv = bb.basis_matrix(f.knots_v, f.degree_v, vs)
-    B = np.kron(Bu, Bv)  # (len(us) * len(vs), nu * nv), flattening (i, j) -> i * nv + j
-    net = (dm.face_rows(fid) @ dm.values).reshape(-1, 3)
-    mask = f.interior_mask()
-    Y = np.asarray(target_grid).reshape(-1, 3)
-    rhs = Y - B[:, ~mask] @ net[~mask]
-    if mask.any():
-        X, *_ = np.linalg.lstsq(B[:, mask], rhs, rcond=None)
-        net[mask] = X
-        f.interior = X.reshape(nu - 2, nv - 2, 3)
-    return float(np.max(np.linalg.norm(B @ net - Y, axis=1)))
+    net = (dm.face_rows(fid) @ dm.values).reshape(nu, nv, 3)
+    Y = np.asarray(target_grid).reshape(len(us), len(vs), 3)
+    if nu > 2 and nv > 2:
+        # On a full tensor grid the interior LS block is kron(Bu_int, Bv_int), so the
+        # least-squares solution separates: X = pinv(Bu_int) R pinv(Bv_int)^T.
+        net[1:-1, 1:-1] = 0.0
+        R = Y - np.einsum("ia,jb,abk->ijk", Bu, Bv, net)
+        X = np.einsum("ai,ijk,bj->abk", np.linalg.pinv(Bu[:, 1:-1]), R, np.linalg.pinv(Bv[:, 1:-1]))
+        net[1:-1, 1:-1] = X
+        f.interior = X.copy()
+    S = np.einsum("ia,jb,abk->ijk", Bu, Bv, net)
+    return float(np.max(np.linalg.norm(S - Y, axis=-1)))
 
 
 def dense_params(knots: np.ndarray, degree: int, per_span: int = 6) -> np.ndarray:

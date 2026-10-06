@@ -1,8 +1,12 @@
-"""Shape-matching objective.
+"""Shape-matching (and physics) objective.
 
     L = lambda_sdf * L_sdf + lambda_cov * L_cov + lambda_normal * L_normal
+        + lambda_volume * ((V - V_target) / V_target)^2
+        + sum_k weight_k * physics_k(p)                         (e.g. normalized FEM compliance)
         + lambda_fair * L_fair                                  (differentiable, "smooth")
       + lambda_complex * C(s)                                   (structural, piecewise constant)
+
+The shape-target terms are skipped when ``target`` is None (physics-only).
 """
 from __future__ import annotations
 
@@ -14,7 +18,7 @@ from ..device import to_tensor
 from ..geometry.state import CADState
 from ..optimization.discretization import Discretization, DiscretizationConfig, get_discretization
 from ..targets.synthetic import Target
-from .complexity import ComplexityConfig, complexity_cost, effective_complexity, structural_complexity
+from .complexity import ComplexityConfig, effective_complexity, structural_complexity
 from .coverage import coverage_loss
 from .normals import normal_loss
 
@@ -26,6 +30,8 @@ class ObjectiveConfig:
     lambda_normal: float = 0.0
     lambda_fair: float = 2e-8
     lambda_volume: float = 0.0  # ((V - V_target) / V_target)^2, V by the divergence theorem
+    volume_target: float | None = None  # defaults to the target shape's volume
+    physics: list = field(default_factory=list)  # differentiable terms: callable(state, P, disc, terms) with .weight
     sdf_eval: str = "trilinear"  # "trilinear" (smooth, used for optimization) | "exact" (narrow band)
     coverage_k: int = 6
     complexity: ComplexityConfig = field(default_factory=ComplexityConfig)
@@ -33,7 +39,8 @@ class ObjectiveConfig:
 
 
 class ShapeObjective:
-    def __init__(self, target: Target, cfg: ObjectiveConfig | None = None):
+    def __init__(self, target: Target | None, cfg: ObjectiveConfig | None = None):
+        """``target`` may be None for purely physics-driven objectives (fit terms are then zero)."""
         self.target = target
         self.cfg = cfg or ObjectiveConfig()
 
@@ -50,31 +57,41 @@ class ShapeObjective:
         nn = torch.linalg.norm(n, dim=1)
         area = (nn * sm.quad_w).detach()
         w = area / area.sum()
-        phi = self.target.sdf(X, exact=cfg.sdf_eval == "exact")
-        out = {"X": X, "Xu": Xu, "Xv": Xv, "w": w, "phi": phi, "area": area.sum()}
-        out["sdf"] = (w * phi**2).sum()
         zero = torch.zeros((), dtype=P.dtype, device=P.device)
-        if cfg.lambda_coverage > 0:
+        out = {"X": X, "Xu": Xu, "Xv": Xv, "w": w}
+        if self.target is not None:
+            out["phi"] = phi = self.target.sdf(X, exact=cfg.sdf_eval == "exact")
+            out["sdf"] = (w * phi**2).sum()
+        else:
+            out["sdf"] = zero
+        if cfg.lambda_coverage > 0 and self.target is not None:
             cs = disc.coverage
             Xc = X if cs is sm else torch.sparse.mm(cs.G, P)
-            out["coverage"], out["cov_d"], out["cov_tri"] = coverage_loss(
+            out["coverage"], out["cov_d"], _ = coverage_loss(
                 self.target.points, Xc, cs.tri_t, cfg.coverage_k)
         else:
             out["coverage"] = zero
-        if cfg.lambda_normal > 0:
+        if cfg.lambda_normal > 0 and self.target is not None:
             out["normal"] = normal_loss(self.target.sdf, X, n / torch.clamp(nn[:, None], min=1e-300), w)
         else:
             out["normal"] = zero
         if cfg.lambda_volume > 0:
             from ..occupancy.field import enclosed_volume
             out["volume"] = enclosed_volume(X, sm.tri_t)
-            out["volume_err"] = ((out["volume"] - self.target.volume) / self.target.volume) ** 2
+            if cfg.volume_target is None and self.target is None:
+                raise ValueError("lambda_volume > 0 needs ObjectiveConfig.volume_target when there is no target")
+            vt = cfg.volume_target if cfg.volume_target is not None else self.target.volume
+            out["volume_err"] = ((out["volume"] - vt) / vt) ** 2
         else:
             out["volume_err"] = zero
         FP = torch.sparse.mm(disc.F, P)
         out["fair"] = (FP**2).sum()
         out["fit"] = (cfg.lambda_sdf * out["sdf"] + cfg.lambda_coverage * out["coverage"]
                       + cfg.lambda_normal * out["normal"] + cfg.lambda_volume * out["volume_err"])
+        for term in cfg.physics:
+            val = term(state, P, disc, out)
+            out[f"physics_{term.name}"] = val
+            out["fit"] = out["fit"] + term.weight * val
         out["smooth"] = out["fit"] + cfg.lambda_fair * out["fair"]
         return out
 
@@ -82,9 +99,6 @@ class ShapeObjective:
         P = to_tensor(state.values() if P is None else P)
         with torch.no_grad():
             return float(self.terms(state, P)["smooth"])
-
-    def complexity(self, state: CADState, effective: bool = True) -> float:
-        return complexity_cost(state, self.cfg.complexity, effective)
 
     def report(self, state: CADState) -> dict:
         """Scalar summary for logging."""

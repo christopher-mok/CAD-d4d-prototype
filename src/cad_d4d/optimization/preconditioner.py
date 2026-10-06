@@ -47,12 +47,13 @@ def fairness_stiffness(disc: Discretization) -> torch.Tensor:
     return disc._fair_rowsum
 
 
-def fairness_hessian_dense(disc: Discretization) -> torch.Tensor:
-    """Dense F^T F on the device (cached per structure)."""
-    if getattr(disc, "_fair_dense", None) is None:
-        H = (disc.F_np.T @ disc.F_np).toarray()
-        disc._fair_dense = torch.as_tensor(H, dtype=torch.float64, device=disc.G_abs.device)
-    return disc._fair_dense
+def scaled_fairness_hessian(disc: Discretization, scale: float) -> torch.Tensor:
+    """Dense ``scale * F^T F`` on the device (cached per structure and scale)."""
+    cached = getattr(disc, "_fair_dense", None)
+    if cached is None or cached[0] != scale:
+        H = (disc.F_np.T @ disc.F_np).toarray() * scale
+        disc._fair_dense = (scale, torch.as_tensor(H, dtype=torch.float64, device=disc.G_abs.device))
+    return disc._fair_dense[1]
 
 
 class Preconditioner:
@@ -73,8 +74,8 @@ class Preconditioner:
         elif kind == "semi_implicit":
             self.diag = None
             if lambda_fair > 0:
-                A = tau * 2.0 * lambda_fair * fairness_hessian_dense(disc)
-                A = A + torch.diag(m)
+                A = scaled_fairness_hessian(disc, tau * 2.0 * lambda_fair).clone()
+                A.diagonal().add_(m)
                 self._chol = torch.linalg.cholesky(A)
             else:
                 self.diag = m
@@ -85,10 +86,3 @@ class Preconditioner:
         if self._chol is not None:
             return torch.cholesky_solve(g, self._chol)
         return g / self.diag[:, None]
-
-
-def preconditioner_diag(disc: Discretization, w: torch.Tensor, kind: str = "lumped_mass_fair",
-                        lambda_fair: float = 0.0, tau: float = 0.5) -> torch.Tensor:
-    """Diagonal variants only (kept for diagnostics)."""
-    p = Preconditioner(disc, w, kind if kind != "semi_implicit" else "lumped_mass_fair", lambda_fair, tau)
-    return p.diag

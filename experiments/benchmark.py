@@ -15,7 +15,6 @@ both by log-log interpolation along the uniform curve.
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 import time
 from pathlib import Path
@@ -25,6 +24,7 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
+from cad_d4d.benchmark.analysis import compare, uniform_curve  # noqa: E402
 from cad_d4d.benchmark.runner import Budget, MethodSpec, ResultStore, run_method  # noqa: E402
 from cad_d4d.benchmark.suite import catalog  # noqa: E402
 from cad_d4d.device import get_device  # noqa: E402
@@ -35,6 +35,8 @@ def method_registry() -> dict[str, MethodSpec]:
     m = [MethodSpec(f"uniform_k{k}", "fixed", k=k) for k in range(6)]
     m += [MethodSpec(f"srd_C_s{s}", "srd", seed=s) for s in (0, 1, 2)]
     m += [MethodSpec(f"srd_C_lam{lam:g}", "srd", seed=0, lambda_complex=lam) for lam in (3e-8, 1e-7, 3e-7, 3e-6)]
+    m += [MethodSpec(f"srd_C_lam{lam:g}_s{s}", "srd", seed=s, lambda_complex=lam) for lam in (1e-7, 3e-8)
+          for s in (0, 1)]
     # throughput variant: up to 3 compatible refinements per round
     m += [MethodSpec(f"srd_C3_lam{lam:g}", "srd", seed=0, lambda_complex=lam, srd={"max_refine_per_round": 3})
           for lam in (3e-8, 1e-7, 3e-7, 1e-6)]
@@ -44,11 +46,19 @@ def method_registry() -> dict[str, MethodSpec]:
                             proposals={"p_refine_boundary": 0.0}))
         m.append(MethodSpec(f"srd_C_crease_lam{lam:g}", "srd", seed=0, lambda_complex=lam,
                             disc={"crease_weight": 1e4}))
+    # ranking variant: refinements by predicted gain per added control point
+    for lam in (1e-8, 3e-8, 1e-7, 3e-7):
+        m.append(MethodSpec(f"srd_C_ratio_lam{lam:g}", "srd", seed=0, lambda_complex=lam, rank_by="ratio"))
+        m.append(MethodSpec(f"srd_C_score_lam{lam:g}", "srd", seed=0, lambda_complex=lam, rank_by="score"))
+    for w in (1e2, 1e3):
+        for lam in (3e-8, 1e-7):
+            m.append(MethodSpec(f"srd_C_crease{w:g}_lam{lam:g}", "srd", seed=0, lambda_complex=lam,
+                                disc={"crease_weight": w}))
     return {x.name: x for x in m}
 
 
 DEFAULT_METHODS = ([f"uniform_k{k}" for k in range(6)] + [f"srd_C_s{s}" for s in (0, 1, 2)]
-                   + [f"srd_C_lam{lam:g}" for lam in (3e-7, 3e-6)])
+                   + [f"srd_C_lam{lam:g}_s{s}" for lam in (1e-7, 3e-8) for s in (0, 1)])
 
 
 def default_methods() -> list[MethodSpec]:
@@ -56,32 +66,11 @@ def default_methods() -> list[MethodSpec]:
     return [reg[n] for n in DEFAULT_METHODS]
 
 
-def interp_loglog(x, xs, ys):
-    """Interpolate y(x) along a curve given at xs (increasing), in log-log; None outside range."""
-    lx, lxs, lys = np.log(x), np.log(xs), np.log(ys)
-    if lx < lxs[0] or lx > lxs[-1]:
-        return None
-    return float(np.exp(np.interp(lx, lxs, lys)))
-
-
-def uniform_curve(rows):
-    pts = sorted((r["n_cp"], r["fit"]) for r in rows if r["kind"] == "fixed")
-    return np.array([p[0] for p in pts], float), np.array([p[1] for p in pts], float)
-
-
-def compare(row, cps, fits):
-    eff = interp_loglog(row["n_cp"], cps, fits)
-    # uniform fits decrease with k; invert the curve for the cp count reaching a fit
-    order = np.argsort(fits)
-    cp_needed = interp_loglog(row["fit"], fits[order], cps[order])
-    return (row["fit"] / eff if eff else None), (cp_needed / row["n_cp"] if cp_needed else None)
-
-
 def report(store: ResultStore, targets: list[str], tag: str, out_dir: Path) -> str:
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    from cad_d4d.visualization.viewer import INK_2, MUTED, SERIES, SURFACE
+    from cad_d4d.visualization.viewer import INK_2, SERIES, SURFACE
 
     lines = [f"# Benchmark report ({tag})", ""]
     eff_all, save_all = [], []
@@ -160,6 +149,7 @@ def main():
     ap.add_argument("--polish", type=int, default=200, help="final exact-SDF steps (all methods)")
     ap.add_argument("--out", default=str(ROOT / "experiments" / "benchmark_out"))
     ap.add_argument("--report", action="store_true")
+    ap.add_argument("--dashboard", action="store_true", help="write the interactive dashboard (viewer.html)")
     args = ap.parse_args()
     out_dir = Path(args.out)
     store = ResultStore(out_dir / "results.jsonl")
@@ -185,6 +175,11 @@ def main():
                   f"ref {res['refinements']:2d} simp {res['simplifications']:2d} ({res['runtime_s']:.0f}s)", flush=True)
     if args.report:
         print(report(store, names, args.tag, out_dir))
+    if args.dashboard:
+        from cad_d4d.visualization.web import benchmark_rows, write_html
+        out = write_html(out_dir / "dashboard.html", [], benchmark_rows(store.path), title="D4D benchmark",
+                         default_tag=args.tag)
+        print(f"wrote {out}")
 
 
 if __name__ == "__main__":

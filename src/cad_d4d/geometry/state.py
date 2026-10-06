@@ -149,15 +149,15 @@ class DofMap:
             self._E = sp.vstack([self.face_rows(fid) for fid in self.face_order]).tocsr()
         return self._E
 
-    def face_row_offsets(self) -> dict[int, int]:
-        out, off = {}, 0
-        for fid in self.face_order:
-            out[fid] = off
-            nu, nv = self.cx.faces[fid].shape
-            off += nu * nv
-        return out
+    def rebind(self, cx: PatchComplex) -> "DofMap":
+        """Shallow copy for a structurally identical complex (used by ``CADState.copy``)."""
+        dm = copy.copy(self)
+        dm.cx = cx
+        dm.values = self.values.copy()
+        dm._carrier_rows, dm._vertex_rows, dm._face_rows = (dict(self._carrier_rows), dict(self._vertex_rows),
+                                                            dict(self._face_rows))
+        return dm
 
-    # -- value helpers -----------------------------------------------------
     def net(self, fid: int, P=None) -> np.ndarray:
         P = self.values if P is None else P
         nu, nv = self.cx.faces[fid].shape
@@ -207,7 +207,10 @@ class CADState:
         self._cache: dict = {}
 
     def copy(self) -> "CADState":
-        return CADState(self.cx.copy(), copy.deepcopy(self.birth_records), copy.deepcopy(self.meta))
+        new = CADState(self.cx.copy(), copy.deepcopy(self.birth_records), copy.deepcopy(self.meta))
+        if self._dof_map is not None:  # same structure: reuse the (structural) DOF map rows
+            new._dof_map = self._dof_map.rebind(new.cx)
+        return new
 
     def structure_changed(self) -> None:
         self._dof_map = None

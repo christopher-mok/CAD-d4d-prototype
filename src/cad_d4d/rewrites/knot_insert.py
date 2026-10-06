@@ -13,7 +13,6 @@ use LocalRefine for point-local capacity.
 """
 from __future__ import annotations
 
-import numpy as np
 
 from ..geometry import bspline_basis as bb
 from ..geometry.state import CADState
@@ -55,11 +54,7 @@ def insert_knot_in_place(state: CADState, fid: int, axis: str, t: float, times: 
     if bb.multiplicity(knots, t) + times > p:
         return "multiplicity would exceed degree"
     net = state.dof_map.net(fid)
-    A = np.eye(bb.num_basis(knots, p))
-    k = knots
-    for _ in range(times):
-        Ai, k = bb.insertion_matrix(k, p, t)
-        A = Ai @ A
+    A, k = bb.insert_times(knots, p, t, times)
     new_net = apply_along_axis(net, A, axis)
     if axis == "u":
         f.knots_u = k

@@ -1,6 +1,5 @@
 """Carrier (edge) knot refinement and the split-line crease penalty."""
 import numpy as np
-import pytest
 
 from cad_d4d.geometry import bspline_basis as bb
 from cad_d4d.geometry.state import root_deviation, watertightness_error
@@ -9,8 +8,6 @@ from cad_d4d.rewrites.carrier_knots import CarrierKnotInsert, CarrierKnotRemove,
 from cad_d4d.rewrites.knot_remove import KnotRemove
 from cad_d4d.rewrites.merge_face import MergeFace
 from cad_d4d.rewrites.split_face import SplitFace
-
-from cad_d4d.optimization.discretization import DiscretizationConfig
 
 from helpers import perturbed_state
 

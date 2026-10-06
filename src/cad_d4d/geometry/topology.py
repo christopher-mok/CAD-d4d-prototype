@@ -247,11 +247,6 @@ class PatchComplex:
         mine = self.face_edges(face_id)
         return {g.id for g in self.faces.values() if g.id != face_id and mine & self.face_edges(g.id)}
 
-    def vertex_neighbors(self, face_id: int) -> set[int]:
-        """Faces sharing at least one vertex with ``face_id``."""
-        mine = self.face_vertices(face_id)
-        return {g.id for g in self.faces.values() if g.id != face_id and mine & self.face_vertices(g.id)}
-
     def vertex_edges(self, vertex_id: int) -> list[int]:
         return [e.id for e in self.edges.values() if vertex_id in (e.v0, e.v1)]
 
@@ -369,14 +364,31 @@ def run_knots_required(cx: PatchComplex, f: Face, side: str, run: Run):
     return A_c, K_c, K_f
 
 
+_RUN_CACHE: dict = {}
+
+
 def run_matrix(cx: PatchComplex, f: Face, side: str, run: Run):
-    """Return (row positions along the side, T) with side cps = T @ carrier cps."""
-    A_c, K_c, K_f = run_knots_required(cx, f, side, run)
+    """Return (row positions along the side, T) with side cps = T @ carrier cps.
+
+    T depends only on the carrier knots, the face side knots and the run
+    parameters, so it is cached across states (rewrites rebuild DOF maps often).
+    """
+    c = cx.carriers[run.carrier]
     knots = f.side_knots(side)
     p = f.side_degree(side)
+    key = (tuple(np.round(c.knots, 12)), c.degree, tuple(np.round(knots, 12)), p,
+           round(run.a, 12), round(run.b, 12), round(run.s_a, 12), round(run.s_b, 12))
+    hit = _RUN_CACHE.get(key)
+    if hit is not None:
+        return hit
+    A_c, K_c, K_f = run_knots_required(cx, f, side, run)
     ia = bb.interpolating_index(knots, p, run.a)
     ib = bb.interpolating_index(knots, p, run.b)
     T = bb.refinement_matrix(K_c, K_f, p) @ A_c
     if T.shape[0] != ib - ia + 1:
         raise TopologyError("run matrix size mismatch")
-    return np.arange(ia, ib + 1), T
+    T.setflags(write=False)
+    if len(_RUN_CACHE) > 50_000:
+        _RUN_CACHE.clear()
+    _RUN_CACHE[key] = out = (np.arange(ia, ib + 1), T)
+    return out

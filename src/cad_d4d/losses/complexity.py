@@ -66,6 +66,3 @@ def effective_complexity(state: CADState, cfg: ComplexityConfig) -> float:
     return C
 
 
-def complexity_cost(state: CADState, cfg: ComplexityConfig, effective: bool = True) -> float:
-    C = effective_complexity(state, cfg) if effective else structural_complexity(state, cfg)
-    return cfg.lambda_complex * C

@@ -67,4 +67,5 @@ def test_knot_remove_refuses_knots_required_by_carriers():
     fid = sorted(s.cx.faces)[0]
     out = KnotRemove(fid, "u", 0.5, eps=10.0).apply(s)
     assert not out.ok and "boundary" in out.reason
-    assert len(knot_remove_candidates(s, 1e-3)) == 12
+    # all face knots are required by the (refined) carriers: the candidate list pre-filters them out
+    assert knot_remove_candidates(s, 1e-3) == []

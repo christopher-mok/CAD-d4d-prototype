@@ -20,10 +20,12 @@ C  "marginal_birth":  score = horizon * eta * B_refine - lambda_birth * dC,
                       simplified during its hold period, then its complexity
                       cost ramps from lambda_birth to lambda_complex. (default)
 
-Inexact rewrites (KnotRemove, MergeFace) always use the immediate difference
+Inexact rewrites (KnotRemove, MergeFace, CarrierKnotRemove) always use the immediate difference
 F(x) - F(x'), with effective (grace-discounted) complexity in mode C.
 """
 from __future__ import annotations
+
+import copy
 
 from dataclasses import dataclass, field
 
@@ -43,6 +45,8 @@ class ScoringConfig:
     mode: str = "marginal_birth"
     eta: float | None = None  # nominal step for predicted improvement (default: continuous eta)
     horizon: float = 1.0
+    log_naive_descent: bool = False  # naive mode: also compute D_new for logging (one extra backward pass)
+    rank_by: str = "ratio"  # "ratio" (refinements by score per added complexity unit) | "score"
 
 
 @dataclass
@@ -77,17 +81,24 @@ def consumed_faces(rewrite: Rewrite, state: CADState) -> set[int]:
     return set()
 
 
+def consumed_lineage(state: CADState, rewrite: Rewrite) -> set[int]:
+    """Birth-record ids carried by the faces a simplifying rewrite consumes."""
+    tags = set()
+    for fid in consumed_faces(rewrite, state):
+        if fid in state.cx.faces:
+            tags |= set(state.cx.faces[fid].lineage)
+    return tags
+
+
 def mark_simplified(before: CADState, after: CADState, rewrite: Rewrite, removed: float) -> list[int]:
     """Charge ``removed`` complexity against the birth records of the consumed structure.
 
     Records touched by the simplification are flagged ``simplified``; their
     still-discounted ``remaining`` complexity shrinks by the removed amount,
-    youngest record first.
+    youngest record first. Mutates ``after.birth_records``: call it once, on
+    acceptance (scoring uses a scratch copy).
     """
-    tags = set()
-    for fid in consumed_faces(rewrite, before):
-        if fid in before.cx.faces:
-            tags |= set(before.cx.faces[fid].lineage)
+    tags = consumed_lineage(before, rewrite)
     hit = sorted((r for r in after.birth_records if r.id in tags), key=lambda r: r.age)
     left = max(0.0, removed)
     for r in hit:
@@ -120,10 +131,7 @@ class RewriteScorer:
         cc = self.obj.cfg.complexity
         if not cc.use_grace:
             return []
-        tags = set()
-        for fid in consumed_faces(rewrite, state):
-            if fid in state.cx.faces:
-                tags |= set(state.cx.faces[fid].lineage)
+        tags = consumed_lineage(state, rewrite)
         return [r.id for r in state.birth_records
                 if r.id in tags and r.remaining > 0 and r.age <= cc.hold_steps]
 
@@ -141,16 +149,23 @@ class RewriteScorer:
         cc = self.obj.cfg.complexity
         new = out.state
         dC = complexity_delta(ctx.state, new, cc)
+        # effective complexity after the rewrite, charging a scratch copy of the birth records
+        # (the real records are charged once, when the rewrite is accepted)
+        records = new.birth_records
+        new.birth_records = copy.deepcopy(records)
         mark_simplified(ctx.state, new, rewrite, -dC)
-        smooth_new = self.obj.smooth_value(new)
-        dC_eff = effective_complexity(new, cc) - ctx.C_eff
+        C_eff_new = effective_complexity(new, cc)
+        new.birth_records = records
+        exact_refinement = rewrite.exact and rewrite.refinement
+        need_gradient = exact_refinement and (self.cfg.mode != "naive" or self.cfg.log_naive_descent)
+        gi_new = self.opt.gradient(new) if need_gradient else None
+        smooth_new = float(gi_new.terms["smooth"]) if gi_new is not None else self.obj.smooth_value(new)
+        dC_eff = C_eff_new - ctx.C_eff
         immediate = (ctx.smooth - smooth_new) - cc.lambda_complex * dC_eff
         info = {"delta_complexity": dC, "delta_complexity_eff": dC_eff, "immediate_gain": immediate,
                 "delta_smooth": smooth_new - ctx.smooth, "deviation": out.deviation,
                 "n_cp_before": ctx.state.n_control_points, "n_cp_after": new.n_control_points}
-        use_marginal = rewrite.exact and rewrite.refinement and self.cfg.mode != "naive"
-        if use_marginal:
-            gi_new = self.opt.gradient(new)
+        if exact_refinement and self.cfg.mode != "naive":
             D_new = gi_new.descent_capacity
             B = D_new - ctx.D_old
             predicted = self.cfg.horizon * self.eta * B
@@ -161,34 +176,9 @@ class RewriteScorer:
         else:
             score = immediate
             info.update(scoring="immediate")
-            if rewrite.exact and rewrite.refinement:
-                gi_new = self.opt.gradient(new)  # logged for comparison only
+            if gi_new is not None:  # naive mode: descent capacity logged for comparison only
                 info.update(D_old=ctx.D_old, D_new=gi_new.descent_capacity,
                             B_refine=gi_new.descent_capacity - ctx.D_old)
         info["score"] = score
+        new.cache.clear()  # release per-candidate operators (dense preconditioner factors etc.)
         return ScoredRewrite(rewrite, out, score, info)
-
-
-def descent_breakdown(objective: ShapeObjective, optimizer: ContinuousOptimizer, state: CADState) -> dict:
-    """Per-term descent capacity D_term = g_term^T M^{-1} g_term (diagnostics)."""
-    import torch
-    from .preconditioner import Preconditioner
-    disc = objective.disc(state)
-    from ..device import to_tensor
-    P = to_tensor(state.values()).requires_grad_(True)
-    t = objective.terms(state, P, disc)
-    pc = Preconditioner(disc, t["w"], optimizer.cfg.preconditioner, objective.cfg.lambda_fair,
-                        optimizer.cfg.eta)
-    c = objective.cfg
-    out = {}
-    for name, val in (("sdf", c.lambda_sdf * t["sdf"]), ("coverage", c.lambda_coverage * t["coverage"]),
-                      ("fair", c.lambda_fair * t["fair"])):
-        if not val.requires_grad:
-            out[name] = 0.0
-            continue
-        (g,) = torch.autograd.grad(val, P, retain_graph=True)
-        Dk = (g * pc.solve(g)).sum(1)
-        out[name] = float(Dk.sum())
-        out[name + "_top"] = state.dof_map.owners[int(Dk.argmax())]
-        out[name + "_top_mass"] = float(pc.m[int(Dk.argmax())])
-    return out

@@ -4,14 +4,18 @@ Residual field on proxy samples:
 
     e(x_s) = |phi_target(x_s)| + c(x_s)
 
-where c splats each target point's coverage distance onto the vertices of its
-nearest proxy triangle (max). Locations are drawn with probability
+where c splats each target point's coverage distance onto its nearest loss
+sample (max). Locations are drawn with probability
 
     P(s)  proportional to  w_s * (e_s + alpha * ||grad e||_s)
 
 (w_s: area weights; grad e by finite differences on each face's sample grid,
-in physical units). Simplification candidates (KnotRemove, MergeFace) are
-enumerated and subsampled.
+in physical units). Without a shape target (physics-only objectives) the
+residual is zero and sampling falls back to area-uniform. Refinement kinds:
+LocalRefine (optionally refining its window's carriers), FaceRefine,
+KnotInsert, CarrierKnotInsert, SplitFace. Simplification candidates
+(KnotRemove -- pre-filtered by invariant I1 --, MergeFace, CarrierKnotRemove)
+are enumerated and subsampled.
 """
 from __future__ import annotations
 
@@ -52,6 +56,9 @@ def residual_field(objective: ShapeObjective, state: CADState, terms: dict) -> d
     """Per-sample residual e, its gradient magnitude, and sampling weights."""
     disc = objective.disc(state)
     sm = disc.sampler
+    if "phi" not in terms:  # no shape target (e.g. physics-only objective): no residual field
+        w = to_numpy(terms["w"])
+        return {"e": np.zeros_like(w), "grad": np.zeros_like(w), "w": w}
     phi = to_numpy(terms["phi"])
     e = np.abs(phi)
     if "cov_d" in terms:
@@ -85,6 +92,8 @@ class ProposalSampler:
             p = rf["w"].copy()
         elif self.cfg.mode == "residual":
             p = rf["w"] * (rf["e"] + self.cfg.alpha_grad * rf["grad"])
+            if p.sum() <= 0:  # no residual information: fall back to uniform
+                p = rf["w"].copy()
         else:
             raise ValueError(self.cfg.mode)
         p = np.maximum(p, 0)
@@ -121,7 +130,8 @@ class ProposalSampler:
                 t = float(u if axis == "u" else v)
                 knots = f.knots_u if axis == "u" else f.knots_v
                 if t < cfg.min_knot_gap or t > 1 - cfg.min_knot_gap or \
-                        np.min(np.abs(bb.interior_knots(knots, 3) - t), initial=1.0) < cfg.min_knot_gap:
+                        np.min(np.abs(bb.interior_knots(knots, f.degree_u if axis == "u" else f.degree_v) - t),
+                               initial=1.0) < cfg.min_knot_gap:
                     continue
                 out.append(KnotInsert(fid, axis, t) if kind == "KnotInsert" else SplitFace(fid, axis, t))
         return out

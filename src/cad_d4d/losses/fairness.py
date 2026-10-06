@@ -61,7 +61,7 @@ def _bending_rows(f, R):
     W = np.outer(wu, wv).ravel() * su * sv  # root-domain area weights
     mats = []
     for (du, dv), coef, scale in (((2, 0), 1.0, su**-2), ((1, 1), 2.0, 1.0 / (su * sv)), ((0, 2), 1.0, sv**-2)):
-        M = sp.csr_matrix(np.kron(B[du], C[dv]) * scale)
+        M = sp.kron(sp.csr_matrix(B[du]), sp.csr_matrix(C[dv]), format="csr") * scale
         mats.append(sp.diags(np.sqrt(coef * W)) @ M)
     return sp.vstack(mats) @ R
 

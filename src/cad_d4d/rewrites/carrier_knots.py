@@ -85,11 +85,7 @@ def insert_carrier_knot_in_place(state: CADState, cid: int, s: float, times: int
     # 2. refine the carrier
     dm = state.dof_map
     cps = dm.carrier_rows(cid) @ dm.values
-    A = np.eye(c.n)
-    k = c.knots
-    for _ in range(times):
-        Ai, k = bb.insertion_matrix(k, p, s)
-        A = Ai @ A
+    A, k = bb.insert_times(c.knots, p, s, times)
     new = A @ cps
     c.knots = k
     c.interior = new[1:-1].copy()
@@ -97,11 +93,11 @@ def insert_carrier_knot_in_place(state: CADState, cid: int, s: float, times: int
     return ""
 
 
-def face_grid_snapshot(state: CADState, n: int = 21) -> dict[int, np.ndarray]:
+def face_grid_snapshot(state: CADState, faces, n: int = 21) -> dict[int, np.ndarray]:
     t = np.linspace(0, 1, n)
     U, V = np.meshgrid(t, t, indexing="ij")
     uv = np.stack([U.ravel(), V.ravel()], 1)
-    return {fid: state.evaluate(fid, uv) for fid in state.cx.faces}
+    return {fid: state.evaluate(fid, uv) for fid in faces}
 
 
 class CarrierKnotInsert(Rewrite):
@@ -149,7 +145,8 @@ class CarrierKnotRemove(Rewrite):
         c = cx.carriers[self.carrier]
         if bb.multiplicity(c.knots, self.s) == 0 or not (TOL < self.s < 1 - TOL):
             return RewriteOutcome(None, "not an interior carrier knot")
-        before = face_grid_snapshot(state)
+        affected = sorted(carrier_faces(state, c.id))  # incl. faces bounded by curves ending on hosted vertices
+        before = face_grid_snapshot(state, affected)
         dm = state.dof_map
         old_cps = dm.carrier_rows(c.id) @ dm.values
         s_fit = dense_params(c.knots, c.degree, 8)
@@ -159,7 +156,7 @@ class CarrierKnotRemove(Rewrite):
         c.interior = np.zeros((c.n - 2, 3))
         fit_carrier_interior(c, old_cps[0], old_cps[-1], s_fit, target)
         state.structure_changed()
-        after = face_grid_snapshot(state)
+        after = face_grid_snapshot(state, affected)
         dev = max(float(np.max(np.linalg.norm(after[f] - before[f], axis=1))) for f in before)
         if dev > self.eps:
             return RewriteOutcome(None, f"deviation {dev:.3e} > eps {self.eps:.1e}", deviation=dev)

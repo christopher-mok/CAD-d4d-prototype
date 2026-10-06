@@ -1,8 +1,7 @@
 """Milestone 8: the full SRD loop."""
-import numpy as np
 import pytest
 
-from cad_d4d.geometry.state import BirthRecord, root_deviation, watertightness_error
+from cad_d4d.geometry.state import BirthRecord, watertightness_error
 from cad_d4d.losses.complexity import complexity_delta
 from cad_d4d.losses.objective import ObjectiveConfig, ShapeObjective
 from cad_d4d.optimization.continuous import ContinuousOptimizer

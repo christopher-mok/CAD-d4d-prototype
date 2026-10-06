@@ -1,0 +1,575 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>D4D Run Viewer</title>
+<style>
+:root {
+  --surface: #fcfcfb; --panel: #f4f3f0; --border: #e4e3df; --ink: #0b0b0b; --ink-2: #52514e; --muted: #9a9893;
+  --s1: #2a78d6; --s2: #eb6834; --s3: #1baf7a; --s4: #eda100; --accent: #2a78d6;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --surface: #1a1a19; --panel: #232322; --border: #383835; --ink: #ffffff; --ink-2: #c3c2b7; --muted: #8a8984;
+    --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500; --accent: #3987e5; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --surface: #1a1a19; --panel: #232322; --border: #383835; --ink: #ffffff; --ink-2: #c3c2b7; --muted: #8a8984;
+  --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500; --accent: #3987e5; color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; background: var(--surface); color: var(--ink);
+  font: 13px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
+header { display: flex; align-items: center; gap: 16px; padding: 8px 16px; border-bottom: 1px solid var(--border); }
+header h1 { font-size: 15px; margin: 0; font-weight: 600; }
+.tabs { display: flex; gap: 4px; }
+.tab { border: 1px solid var(--border); background: transparent; color: var(--ink-2); padding: 5px 12px;
+  border-radius: 6px; cursor: pointer; font: inherit; }
+.tab.active { background: var(--panel); color: var(--ink); border-color: var(--muted); }
+.spacer { flex: 1; }
+main { height: calc(100% - 45px); }
+.view { display: none; height: 100%; }
+.view.active { display: flex; }
+/* replay */
+#replay { flex-direction: column; }
+#replay-body { flex: 1; display: flex; min-height: 0; }
+#canvas-wrap { flex: 1; position: relative; min-width: 0; }
+#canvas-wrap canvas { display: block; width: 100%; height: 100%; }
+#legend3d { position: absolute; left: 12px; bottom: 12px; background: color-mix(in srgb, var(--surface) 85%, transparent);
+  border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px; font-size: 12px; color: var(--ink-2); }
+#legend3d .sw { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin: 0 4px 0 10px; vertical-align: -1px; }
+#legend3d .ramp { display: inline-block; width: 90px; height: 8px; border-radius: 4px; vertical-align: 0; margin: 0 6px;
+  background: linear-gradient(90deg, #cde2fb, #86b6ef, #3987e5, #1c5cab, #0d366b); }
+aside { width: 380px; border-left: 1px solid var(--border); overflow-y: auto; padding: 10px 12px; background: var(--surface); }
+aside h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--ink-2); margin: 14px 0 6px; }
+.stats { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px; }
+.stat { background: var(--panel); border-radius: 6px; padding: 6px 8px; }
+.stat .k { font-size: 11px; color: var(--ink-2); }
+.stat .v { font-size: 15px; font-variant-numeric: tabular-nums; }
+.toggles label { display: inline-flex; align-items: center; gap: 4px; margin: 2px 10px 2px 0; color: var(--ink-2); }
+select, input[type=range] { accent-color: var(--accent); }
+select { background: var(--panel); color: var(--ink); border: 1px solid var(--border); border-radius: 4px; padding: 2px 4px; font: inherit; }
+.chart { height: 150px; }
+table { width: 100%; border-collapse: collapse; font-size: 12px; }
+th, td { text-align: left; padding: 3px 4px; border-bottom: 1px solid var(--border); font-variant-numeric: tabular-nums; }
+th { color: var(--ink-2); font-weight: 500; cursor: pointer; user-select: none; }
+td.num, th.num { text-align: right; }
+.st-accepted { color: var(--s3); font-weight: 600; }
+.st-rejected { color: var(--muted); }
+.st-other { color: var(--s4); }
+#events li { cursor: pointer; margin: 2px 0; color: var(--ink-2); }
+#events li:hover { color: var(--ink); text-decoration: underline; }
+#events { padding-left: 18px; margin: 0; }
+#timeline { display: flex; align-items: center; gap: 8px; padding: 8px 16px; border-top: 1px solid var(--border); }
+#timeline button { border: 1px solid var(--border); background: var(--panel); color: var(--ink); border-radius: 6px;
+  padding: 4px 10px; cursor: pointer; font: inherit; min-width: 34px; }
+#slider { flex: 1; }
+#frame-label { min-width: 170px; text-align: right; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+/* benchmark */
+#bench { flex-direction: column; overflow-y: auto; padding: 12px 16px; }
+.filters { display: flex; flex-wrap: wrap; gap: 14px; align-items: center; margin-bottom: 10px; color: var(--ink-2); }
+.cards { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 12px; }
+.card { background: var(--panel); border-radius: 8px; padding: 8px 12px; min-width: 190px; }
+.card .k { font-size: 11px; color: var(--ink-2); }
+.card .v { font-size: 18px; font-variant-numeric: tabular-nums; }
+#pareto-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 10px; }
+.pchart { height: 260px; border: 1px solid var(--border); border-radius: 8px; }
+.note { color: var(--ink-2); font-size: 12px; margin: 4px 0 10px; }
+.empty { color: var(--ink-2); padding: 40px; text-align: center; width: 100%; }
+@media (max-width: 800px) {
+  #replay-body { flex-direction: column; }
+  aside { width: 100%; border-left: none; border-top: 1px solid var(--border); max-height: 45%; }
+  #canvas-wrap { min-height: 50vh; }
+}
+</style>
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+} }
+</script>
+<script src="https://cdn.jsdelivr.net/npm/plotly.js-dist-min@2.35.2/plotly.min.js"></script>
+</head>
+<body>
+<header>
+  <h1 id="title">D4D Run Viewer</h1>
+  <div class="tabs">
+    <button class="tab active" data-view="replay">Run replay</button>
+    <button class="tab" data-view="bench">Benchmark</button>
+  </div>
+  <div class="spacer"></div>
+  <label style="color:var(--ink-2)">Run <select id="run-select"></select></label>
+</header>
+<main>
+  <section id="replay" class="view active">
+    <div id="replay-body">
+      <div id="canvas-wrap">
+        <div id="legend3d"></div>
+      </div>
+      <aside>
+        <h2>Current frame</h2>
+        <div class="stats" id="stats"></div>
+        <h2>Layers</h2>
+        <div class="toggles">
+          <label><input type="checkbox" id="t-target" checked> target</label>
+          <label><input type="checkbox" id="t-surface" checked> surface</label>
+          <label><input type="checkbox" id="t-bound" checked> patch boundaries</label>
+          <label><input type="checkbox" id="t-net"> control net</label>
+          <label><input type="checkbox" id="t-pts" checked> control points</label>
+          <label><input type="checkbox" id="t-props" checked> proposals</label>
+          <label>color <select id="color-mode">
+            <option value="residual">residual |phi| (per-frame scale)</option>
+            <option value="residual-fixed">residual |phi| (scale of frame 1)</option>
+            <option value="refined">refined faces</option>
+            <option value="plain">plain</option>
+          </select></label>
+        </div>
+        <h2>Loss (log)</h2>
+        <div id="chart-loss" class="chart"></div>
+        <h2>Control points</h2>
+        <div id="chart-cp" class="chart"></div>
+        <h2>Proposals at the most recent discrete phase</h2>
+        <div class="note" id="phase-note"></div>
+        <table id="props"><thead><tr><th>kind</th><th>status</th><th class="num">score</th>
+          <th class="num">B_refine</th><th class="num">dC</th></tr></thead><tbody></tbody></table>
+        <h2>Accepted rewrites (click to jump)</h2>
+        <ol id="events"></ol>
+      </aside>
+    </div>
+    <div id="timeline">
+      <button id="b-first" title="first frame">|&lt;</button>
+      <button id="b-prev" title="previous frame (Left)">&lt;</button>
+      <button id="b-play" title="play / pause (Space)">Play</button>
+      <button id="b-next" title="next frame (Right)">&gt;</button>
+      <button id="b-event" title="next accepted rewrite">next rewrite</button>
+      <select id="speed"><option value="2">slow</option><option value="8" selected>normal</option><option value="24">fast</option></select>
+      <input type="range" id="slider" min="0" max="0" value="0">
+      <span id="frame-label"></span>
+    </div>
+  </section>
+  <section id="bench" class="view">
+    <div class="filters">
+      <label>tag <select id="f-tag"></select></label>
+      <label>split <select id="f-split"><option value="all" selected>all</option><option value="tune">tune</option><option value="test">test</option></select></label>
+      <label>family <select id="f-family"><option value="all">all</option><option value="grammar">grammar</option><option value="analytic">analytic</option></select></label>
+    </div>
+    <div class="note">Each panel: one target. Gray line: fixed uniform refinement (k = 0..5 knots per direction).
+      Points: adaptive SRD runs. Lower-left is better; points below the gray line beat uniform refinement at equal size.</div>
+    <div class="cards" id="cards"></div>
+    <div id="pareto-grid"></div>
+    <h2 style="font-size:13px;margin:18px 0 6px">All runs</h2>
+    <table id="bench-table"><thead></thead><tbody></tbody></table>
+  </section>
+</main>
+<script id="d4d-data" type="application/json">__D4D_DATA__</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+const DATA = JSON.parse(document.getElementById('d4d-data').textContent);
+const css = (v) => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+document.getElementById('title').textContent = DATA.title || 'D4D Run Viewer';
+
+// ---------- tabs ----------
+document.querySelectorAll('.tab').forEach(b => b.addEventListener('click', () => {
+  document.querySelectorAll('.tab').forEach(x => x.classList.toggle('active', x === b));
+  document.querySelectorAll('.view').forEach(v => v.classList.toggle('active', v.id === b.dataset.view));
+  if (b.dataset.view === 'bench') renderBench(); else onResize();
+}));
+
+// ---------- decoding ----------
+function bytes(b64) { const s = atob(b64); const u = new Uint8Array(s.length); for (let i = 0; i < s.length; i++) u[i] = s.charCodeAt(i); return u; }
+const f32 = (b64) => new Float32Array(bytes(b64).buffer);
+const i32 = (b64) => new Int32Array(bytes(b64).buffer);
+const fmt = (v, d = 2) => (v === null || v === undefined || Number.isNaN(v)) ? '–' : (Math.abs(v) >= 1e-2 && Math.abs(v) < 1e4 ? v.toFixed(d) : v.toExponential(d));
+
+// ---------- color ramps ----------
+const RAMP = ['#cde2fb', '#86b6ef', '#3987e5', '#1c5cab', '#0d366b'].map(h => new THREE.Color(h));
+function rampColor(t, out) {
+  t = Math.min(1, Math.max(0, t)) * (RAMP.length - 1);
+  const i = Math.min(RAMP.length - 2, Math.floor(t)), f = t - i;
+  out.r = RAMP[i].r + (RAMP[i + 1].r - RAMP[i].r) * f; out.g = RAMP[i].g + (RAMP[i + 1].g - RAMP[i].g) * f;
+  out.b = RAMP[i].b + (RAMP[i + 1].b - RAMP[i].b) * f; return out;
+}
+const BASE = new THREE.Color('#c9d6ea'), REFINED = new THREE.Color('#f2b394');
+
+// ---------- three.js scene ----------
+const wrap = document.getElementById('canvas-wrap');
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(window.devicePixelRatio);
+wrap.prepend(renderer.domElement);
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(35, 1, 0.01, 100);
+camera.position.set(3.2, 2.2, 3.2);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+scene.add(new THREE.HemisphereLight(0xffffff, 0x8a8f99, 1.1));
+const keyLight = new THREE.DirectionalLight(0xffffff, 1.4);
+scene.add(keyLight);
+function onResize() {
+  const w = wrap.clientWidth, h = wrap.clientHeight; if (!w || !h) return;
+  renderer.setSize(w, h, false); camera.aspect = w / h; camera.updateProjectionMatrix();
+}
+window.addEventListener('resize', onResize);
+function setBackground() { renderer.setClearColor(new THREE.Color(css('--surface') || '#fcfcfb')); }
+setBackground();
+matchMedia('(prefers-color-scheme: dark)').addEventListener('change', setBackground);
+
+const groups = { target: new THREE.Group(), surface: new THREE.Group(), bound: new THREE.Group(), net: new THREE.Group(),
+                 pts: new THREE.Group(), props: new THREE.Group() };
+Object.values(groups).forEach(g => scene.add(g));
+
+// ---------- run state ----------
+const runs = DATA.recordings || [];
+const runSel = document.getElementById('run-select');
+runs.forEach((r, i) => runSel.add(new Option(r.name, i)));
+let run = null, frameIdx = 0, playing = false, structIdx = -1, residMax = 1, residScale = 1;
+const cache = { struct: null };
+
+function buildTarget(r) {
+  groups.target.clear();
+  const t = r.target;
+  if (t.V) {
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.BufferAttribute(f32(t.V), 3));
+    g.setIndex(new THREE.BufferAttribute(new Uint32Array(i32(t.T)), 1));
+    g.computeVertexNormals();
+    groups.target.add(new THREE.Mesh(g, new THREE.MeshStandardMaterial({ color: 0x9aa3ad, transparent: true, opacity: 0.18,
+      depthWrite: false, side: THREE.DoubleSide })));
+  } else {
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.BufferAttribute(f32(t.points), 3));
+    groups.target.add(new THREE.Points(g, new THREE.PointsMaterial({ color: 0x8a8f99, size: 0.012 })));
+  }
+}
+
+function buildStructure(s) {
+  // triangles + boundary segments over the per-face sample grids; net segments over per-face control nets
+  const tri = [], bnd = [], netSeg = [];
+  let netOff = 0;
+  for (const f of s.faces) {
+    const { offset: o, nu, nv } = f;
+    for (let i = 0; i < nu - 1; i++) for (let j = 0; j < nv - 1; j++) {
+      const a = o + i * nv + j, b = o + (i + 1) * nv + j, c = b + 1, d = a + 1;
+      tri.push(a, b, c, a, c, d);
+    }
+    for (let i = 0; i < nu - 1; i++) { bnd.push(o + i * nv, o + (i + 1) * nv, o + i * nv + nv - 1, o + (i + 1) * nv + nv - 1); }
+    for (let j = 0; j < nv - 1; j++) { bnd.push(o + j, o + j + 1, o + (nu - 1) * nv + j, o + (nu - 1) * nv + j + 1); }
+    const cu = f.net_u, cv = f.net_v;
+    for (let i = 0; i < cu; i++) for (let j = 0; j < cv; j++) {
+      const k = netOff + i * cv + j;
+      if (i < cu - 1) netSeg.push(k, k + cv);
+      if (j < cv - 1) netSeg.push(k, k + 1);
+    }
+    netOff += cu * cv;
+  }
+  const refined = new Uint8Array(s.n_samples);
+  for (const f of s.faces) if (f.refined) refined.fill(1, f.offset, f.offset + f.nu * f.nv);
+  return { tri, bnd, netSeg, refined, nNet: netOff };
+}
+
+function ensureStructure(si) {
+  if (si === structIdx) return;
+  structIdx = si;
+  const s = run.structures[si];
+  const st = buildStructure(s);
+  groups.surface.clear(); groups.bound.clear(); groups.net.clear(); groups.pts.clear();
+  const pos = new THREE.BufferAttribute(new Float32Array(s.n_samples * 3), 3);
+  const col = new THREE.BufferAttribute(new Float32Array(s.n_samples * 3), 3);
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', pos); g.setAttribute('color', col); g.setIndex(st.tri);
+  groups.surface.add(new THREE.Mesh(g, new THREE.MeshStandardMaterial({ vertexColors: true, side: THREE.DoubleSide,
+    roughness: 0.85, metalness: 0.0, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1 })));
+  const gb = new THREE.BufferGeometry(); gb.setAttribute('position', pos); gb.setIndex(st.bnd);
+  groups.bound.add(new THREE.LineSegments(gb, new THREE.LineBasicMaterial({ color: 0x1c1c1a })));
+  const npos = new THREE.BufferAttribute(new Float32Array(st.nNet * 3), 3);
+  const gn = new THREE.BufferGeometry(); gn.setAttribute('position', npos); gn.setIndex(st.netSeg);
+  groups.net.add(new THREE.LineSegments(gn, new THREE.LineBasicMaterial({ color: 0x9a9893, transparent: true, opacity: 0.7 })));
+  const kinds = s.dof_kinds, kc = { v: new THREE.Color(css('--s1')), c: new THREE.Color(css('--s2')), f: new THREE.Color(css('--s3')) };
+  const ppos = new THREE.BufferAttribute(new Float32Array(kinds.length * 3), 3);
+  const pcol = new Float32Array(kinds.length * 3);
+  for (let i = 0; i < kinds.length; i++) { const c = kc[kinds[i]]; pcol.set([c.r, c.g, c.b], 3 * i); }
+  const gp = new THREE.BufferGeometry(); gp.setAttribute('position', ppos); gp.setAttribute('color', new THREE.BufferAttribute(pcol, 3));
+  groups.pts.add(new THREE.Points(gp, new THREE.PointsMaterial({ vertexColors: true, size: 0.03 })));
+  cache.struct = { s, st, pos, col, npos, ppos, mesh: groups.surface.children[0] };
+}
+
+function decodeFrame(fr) {
+  if (!fr._X) { fr._X = f32(fr.X); fr._R = f32(fr.resid); fr._P = f32(fr.P); fr._N = f32(fr.nets); }
+  return fr;
+}
+
+function applyFrame(i) {
+  frameIdx = i;
+  const fr = decodeFrame(run.frames[i]);
+  ensureStructure(fr.structure);
+  const c = cache.struct;
+  c.pos.array.set(fr._X); c.pos.needsUpdate = true;
+  c.npos.array.set(fr._N); c.npos.needsUpdate = true;
+  c.ppos.array.set(fr._P); c.ppos.needsUpdate = true;
+  c.mesh.geometry.computeVertexNormals();
+  c.mesh.geometry.computeBoundingSphere();
+  colorSurface(fr);
+  updateProposals(fr);
+  updatePanel(fr);
+  document.getElementById('slider').value = i;
+}
+
+function colorSurface(fr) {
+  const c = cache.struct, mode = document.getElementById('color-mode').value, out = new THREE.Color();
+  const arr = c.col.array, R = fr._R, ref = c.st.refined;
+  if (mode === 'residual') {
+    const s = Array.from(R).sort((a, b) => a - b);
+    residScale = Math.max(1e-9, s[Math.floor(0.99 * (s.length - 1))]);
+  } else residScale = residMax;
+  for (let k = 0; k < R.length; k++) {
+    if (mode.startsWith('residual')) rampColor(R[k] / residScale, out);
+    else if (mode === 'refined' && ref[k]) out.copy(REFINED);
+    else out.copy(BASE);
+    arr[3 * k] = out.r; arr[3 * k + 1] = out.g; arr[3 * k + 2] = out.b;
+  }
+  c.col.needsUpdate = true;
+  updateLegend(mode);
+}
+
+function updateLegend(mode) {
+  const sw = (v, label) => `<span class="sw" style="background:${css(v)}"></span>${label}`;
+  let html = mode.startsWith('residual') ? `|phi| 0 <span class="ramp"></span> ${fmt(residScale)}` :
+             mode === 'refined' ? `<span class="sw" style="background:#f2b394;margin-left:0"></span>refined faces` : 'surface';
+  html += ` &nbsp; control points:${sw('--s1', 'vertex')}${sw('--s2', 'edge curve')}${sw('--s3', 'face')}`;
+  html += ` &nbsp; proposals:${sw('--s3', 'accepted')}${sw('--muted', 'rejected')}${sw('--s4', 'cap / conflict')}`;
+  document.getElementById('legend3d').innerHTML = html;
+}
+
+// proposals of the most recent discrete phase at or before the frame
+function phaseFor(fr) {
+  let best = null;
+  for (const e of run._phases) { if (e.step <= fr.step) best = e; }
+  return best;
+}
+function updateProposals(fr) {
+  groups.props.clear();
+  const ph = phaseFor(fr);
+  const tbody = document.querySelector('#props tbody'); tbody.innerHTML = '';
+  document.getElementById('phase-note').textContent = ph ? `round ${ph.round}, after step ${ph.step}: ${ph.props.length} proposals` : 'no discrete phase yet';
+  if (!ph) return;
+  const geo = new THREE.SphereGeometry(0.03, 14, 10);
+  const mk = (c) => new THREE.MeshBasicMaterial({ color: c, depthTest: false, transparent: true, opacity: 0.95 });
+  const mats = { accepted: mk(css('--s3')), rejected: mk(css('--muted')), other: mk(css('--s4')) };
+  const rows = [...ph.props].sort((a, b) => (b.score ?? -1e99) - (a.score ?? -1e99));
+  for (const p of rows) {
+    const st = p.status === 'accepted' ? 'accepted' : (p.status === 'rejected' ? 'rejected' : 'other');
+    if (p.location) {
+      const m = new THREE.Mesh(geo, mats[st]); m.position.set(...p.location); m.renderOrder = 10;
+      if (st === 'accepted') { m.scale.setScalar(1.9); m.renderOrder = 11; }
+      groups.props.add(m);
+    }
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${p.kind}</td><td class="st-${st}">${p.status}</td>
+      <td class="num">${fmt(p.score)}</td><td class="num">${fmt(p.B_refine)}</td><td class="num">${fmt(p.delta_complexity, 0)}</td>`;
+    tr.title = p.reason || '';
+    tbody.appendChild(tr);
+  }
+}
+
+function updatePanel(fr) {
+  const s = run.structures[fr.structure], m = fr.metrics;
+  const items = [['step', fr.step, 0], ['round', fr.round, 0], ['faces', s.n_faces, 0], ['control pts', s.n_cp, 0],
+                 ['loss', m.loss ?? m.smooth], ['sdf', m.sdf], ['coverage', m.coverage], ['fairness', m.fair], ['step size', m.eta]];
+  document.getElementById('stats').innerHTML = items.map(([k, v, d]) =>
+    `<div class="stat"><div class="k">${k}</div><div class="v">${d === 0 ? (v ?? '–') : fmt(v)}</div></div>`).join('');
+  document.getElementById('frame-label').textContent = `frame ${frameIdx + 1}/${run.frames.length} · step ${fr.step}`;
+  moveCursor(fr.step);
+}
+
+// ---------- charts ----------
+let cursorTimer = null;
+function chartLayout(ylog) {
+  return { margin: { l: 48, r: 8, t: 6, b: 26 }, paper_bgcolor: 'rgba(0,0,0,0)', plot_bgcolor: 'rgba(0,0,0,0)',
+           font: { color: css('--ink-2'), size: 10 }, showlegend: false,
+           xaxis: { gridcolor: css('--border'), zeroline: false },
+           yaxis: { type: ylog ? 'log' : 'linear', gridcolor: css('--border'), zeroline: false, exponentformat: 'e' },
+           shapes: [] };
+}
+function drawCharts() {
+  const steps = run.frames.map(f => f.step);
+  const loss = run.frames.map(f => f.metrics.loss ?? f.metrics.smooth);
+  const cps = run.frames.map(f => run.structures[f.structure].n_cp);
+  const ev = run.events.filter(e => e.type === 'accepted');
+  const evShapes = ev.map(e => ({ type: 'line', x0: e.step, x1: e.step, yref: 'paper', y0: 0, y1: 1,
+                                  line: { color: e.delta_complexity > 0 ? css('--s2') : css('--muted'), width: 1, dash: e.delta_complexity > 0 ? 'solid' : 'dot' } }));
+  const cfg = { displayModeBar: false, responsive: true };
+  const l1 = chartLayout(true); l1.shapes = [...evShapes];
+  Plotly.newPlot('chart-loss', [{ x: steps, y: loss, mode: 'lines', line: { color: css('--s1'), width: 2 },
+                                  hovertemplate: 'step %{x}<br>loss %{y:.3e}<extra></extra>' }], l1, cfg);
+  const l2 = chartLayout(false); l2.shapes = [...evShapes];
+  Plotly.newPlot('chart-cp', [{ x: steps, y: cps, mode: 'lines', line: { color: css('--s1'), width: 2, shape: 'hv' },
+                                hovertemplate: 'step %{x}<br>%{y} control points<extra></extra>' }], l2, cfg);
+  run._evShapes = evShapes;
+}
+function moveCursor(step) {
+  if (cursorTimer) return;
+  cursorTimer = setTimeout(() => {
+    cursorTimer = null;
+    const cur = { type: 'line', x0: step, x1: step, yref: 'paper', y0: 0, y1: 1, line: { color: css('--ink'), width: 1 } };
+    for (const id of ['chart-loss', 'chart-cp']) Plotly.relayout(id, { shapes: [...run._evShapes, cur] });
+  }, playing ? 120 : 0);
+}
+
+// ---------- run selection ----------
+function loadRun(i) {
+  if (!runs.length) { document.getElementById('replay').innerHTML = '<div class="empty">No run recordings embedded. Build with --recording.</div>'; return; }
+  run = runs[i]; structIdx = -1;
+  buildTarget(run);
+  // global residual scale: 99th percentile of the first frame
+  const r0 = Array.from(f32(run.frames[0].resid)).sort((a, b) => a - b);
+  residMax = Math.max(1e-6, r0[Math.floor(0.99 * (r0.length - 1))]);
+  // discrete phases
+  const ph = new Map();
+  for (const e of run.events) if (e.type === 'proposal') {
+    if (!ph.has(e.step)) ph.set(e.step, { step: e.step, round: e.round, props: [] });
+    ph.get(e.step).props.push(e);
+  }
+  run._phases = [...ph.values()].sort((a, b) => a.step - b.step);
+  const ol = document.getElementById('events'); ol.innerHTML = '';
+  run.events.filter(e => e.type === 'accepted').forEach(e => {
+    const li = document.createElement('li'); li.textContent = `step ${e.step}: ${e.rewrite} (score ${fmt(e.score)})`;
+    li.onclick = () => jumpToStep(e.step); ol.appendChild(li);
+  });
+  const sl = document.getElementById('slider'); sl.max = run.frames.length - 1;
+  drawCharts();
+  // frame the camera on the first frame
+  applyFrame(0);
+  const sph = cache.struct.mesh.geometry.boundingSphere;
+  controls.target.copy(sph.center);
+  camera.position.copy(sph.center).add(new THREE.Vector3(1.4, 0.9, 1.4).multiplyScalar(sph.radius * 2.0));
+  onResize();
+}
+function jumpToStep(step) {
+  let k = run.frames.findIndex(f => f.step >= step);
+  if (k < 0) k = run.frames.length - 1;
+  applyFrame(k);
+}
+runSel.addEventListener('change', () => loadRun(+runSel.value));
+
+// ---------- controls ----------
+const toggles = { 't-target': 'target', 't-surface': 'surface', 't-bound': 'bound', 't-net': 'net', 't-pts': 'pts', 't-props': 'props' };
+for (const [id, g] of Object.entries(toggles)) {
+  const el = document.getElementById(id);
+  const set = () => groups[g].visible = el.checked; el.addEventListener('change', set); set();
+}
+document.getElementById('color-mode').addEventListener('change', () => run && colorSurface(run.frames[frameIdx]));
+document.getElementById('slider').addEventListener('input', e => applyFrame(+e.target.value));
+document.getElementById('b-first').onclick = () => applyFrame(0);
+document.getElementById('b-prev').onclick = () => applyFrame(Math.max(0, frameIdx - 1));
+document.getElementById('b-next').onclick = () => applyFrame(Math.min(run.frames.length - 1, frameIdx + 1));
+document.getElementById('b-event').onclick = () => {
+  const cur = run.frames[frameIdx].step;
+  const e = run.events.find(e => e.type === 'accepted' && e.step > cur);
+  if (e) jumpToStep(e.step);
+};
+const playBtn = document.getElementById('b-play');
+function setPlaying(p) { playing = p; playBtn.textContent = p ? 'Pause' : 'Play'; }
+playBtn.onclick = () => setPlaying(!playing);
+window.addEventListener('keydown', e => {
+  if (!run || e.target.tagName === 'SELECT' || e.target.tagName === 'INPUT' && e.target.type !== 'range') return;
+  if (e.code === 'Space') { e.preventDefault(); setPlaying(!playing); }
+  if (e.code === 'ArrowRight') applyFrame(Math.min(run.frames.length - 1, frameIdx + 1));
+  if (e.code === 'ArrowLeft') applyFrame(Math.max(0, frameIdx - 1));
+});
+let acc = 0, last = performance.now();
+function loop(now) {
+  const dt = (now - last) / 1000; last = now;
+  if (playing && run) {
+    acc += dt * +document.getElementById('speed').value;
+    while (acc >= 1) {
+      acc -= 1;
+      if (frameIdx >= run.frames.length - 1) { setPlaying(false); break; }
+      applyFrame(frameIdx + 1);
+    }
+  }
+  keyLight.position.copy(camera.position);
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+loadRun(0);
+requestAnimationFrame(loop);
+
+// ---------- benchmark dashboard ----------
+const bench = DATA.benchmark;
+let benchDrawn = '';
+function groupOf(m) { return m.startsWith('uniform') ? 'uniform' : (/^srd_C_s\d+$/.test(m) ? 'seeds' : (m.includes('_lam') && /^srd_C_lam/.test(m) ? 'lambda' : 'variant')); }
+const median = (a) => { if (!a.length) return null; const s = [...a].sort((x, y) => x - y); const m = Math.floor(s.length / 2); return s.length % 2 ? s[m] : 0.5 * (s[m - 1] + s[m]); };
+function renderBench() {
+  if (!bench || !bench.rows || !bench.rows.length) { document.getElementById('bench').innerHTML = '<div class="empty">No benchmark results embedded. Build with --benchmark results.jsonl.</div>'; return; }
+  const tagSel = document.getElementById('f-tag');
+  if (!tagSel.options.length) {
+    const tags = [...new Set(bench.rows.map(r => r.tag))];
+    tags.forEach(t => tagSel.add(new Option(t, t)));
+    tagSel.value = bench.default_tag || tags[tags.length - 1];
+    ['f-tag', 'f-split', 'f-family'].forEach(id => document.getElementById(id).addEventListener('change', renderBench));
+  }
+  const tag = tagSel.value, split = document.getElementById('f-split').value, fam = document.getElementById('f-family').value;
+  const key = [tag, split, fam].join('|'); if (key === benchDrawn) return; benchDrawn = key;
+  const rows = bench.rows.filter(r => r.tag === tag && (split === 'all' || r.split === split) && (fam === 'all' || r.family === fam));
+  const targets = [...new Set(rows.map(r => r.target))];
+  // summary cards over the adaptive seed runs
+  const ad = rows.filter(r => groupOf(r.method) === 'seeds');
+  const eff = ad.map(r => r.efficiency).filter(x => x !== null && x !== undefined);
+  const sav = ad.map(r => r.cp_saving).filter(x => x !== null && x !== undefined);
+  const best = targets.map(t => { const u = rows.filter(r => r.target === t && r.kind === 'fixed'); return Math.min(...u.map(r => r.fit)); });
+  const beat = ad.filter(r => r.fit < Math.min(...rows.filter(x => x.target === r.target && x.kind === 'fixed').map(x => x.fit))).length;
+  document.getElementById('cards').innerHTML = [
+    ['targets', targets.length], ['adaptive runs (seeds)', ad.length],
+    ['median efficiency (fit / uniform fit at equal size)', eff.length ? fmt(median(eff)) : '–'],
+    ['runs better than uniform at equal size', eff.length ? `${eff.filter(e => e < 1).length} / ${eff.length}` : '–'],
+    ['median control-point saving', sav.length ? fmt(median(sav)) + 'x' : '–'],
+    ['runs below best uniform fit (k=5)', `${beat} / ${ad.length}`],
+  ].map(([k, v]) => `<div class="card"><div class="k">${k}</div><div class="v">${v}</div></div>`).join('');
+  // per-target Pareto charts
+  const grid = document.getElementById('pareto-grid'); grid.innerHTML = '';
+  const colors = { seeds: css('--s1'), lambda: css('--s2'), variant: css('--s3') };
+  const names = { seeds: 'adaptive C (seeds)', lambda: 'adaptive C, lambda sweep', variant: 'other variants' };
+  for (const t of targets) {
+    const div = document.createElement('div'); div.className = 'pchart'; grid.appendChild(div);
+    const tr = rows.filter(r => r.target === t);
+    const uni = tr.filter(r => r.kind === 'fixed').sort((a, b) => a.n_cp - b.n_cp);
+    const traces = [{ x: uni.map(r => r.n_cp), y: uni.map(r => r.fit), mode: 'lines+markers', name: 'uniform k=0..5',
+      line: { color: css('--muted'), width: 2 }, marker: { size: 6 },
+      text: uni.map(r => r.method), hovertemplate: '%{text}<br>%{x} cps<br>fit %{y:.2e}<extra></extra>' }];
+    for (const g of ['seeds', 'lambda', 'variant']) {
+      const pts = tr.filter(r => r.kind !== 'fixed' && groupOf(r.method) === g);
+      if (!pts.length) continue;
+      traces.push({ x: pts.map(r => r.n_cp), y: pts.map(r => r.fit), mode: 'markers', name: names[g],
+        marker: { size: 10, color: colors[g], line: { color: css('--surface'), width: 2 } },
+        text: pts.map(r => `${r.method}<br>faces ${r.n_faces}, ${r.refinements} refinements / ${r.simplifications} simplifications<br>efficiency ${fmt(r.efficiency)} · ${fmt(r.runtime_s, 0)} s`),
+        hovertemplate: '%{text}<br>%{x} cps · fit %{y:.2e}<extra></extra>' });
+    }
+    const lay = chartLayout(true);
+    lay.xaxis.type = 'log'; lay.xaxis.title = { text: 'control points', font: { size: 10 } };
+    lay.title = { text: t, font: { size: 12, color: css('--ink') }, x: 0.02, y: 0.97 };
+    lay.margin = { l: 52, r: 8, t: 26, b: 36 }; lay.showlegend = true;
+    lay.legend = { orientation: 'h', y: -0.28, font: { size: 9 } };
+    Plotly.newPlot(div, traces, lay, { displayModeBar: false, responsive: true });
+  }
+  // table
+  const cols = [['target', 'target'], ['method', 'method'], ['fit', 'fit', 1], ['n_cp', 'control pts', 1], ['n_faces', 'faces', 1],
+                ['efficiency', 'efficiency', 1], ['cp_saving', 'cp saving', 1], ['refinements', 'refine', 1], ['runtime_s', 'runtime (s)', 1]];
+  const table = document.getElementById('bench-table');
+  table.tHead.innerHTML = '<tr>' + cols.map(([k, l, n]) => `<th class="${n ? 'num' : ''}" data-k="${k}">${l}</th>`).join('') + '</tr>';
+  let sortKey = 'target', asc = true;
+  const draw = () => {
+    const s = [...rows].sort((a, b) => { const x = a[sortKey], y = b[sortKey]; return (x > y ? 1 : x < y ? -1 : 0) * (asc ? 1 : -1); });
+    table.tBodies[0].innerHTML = s.map(r => '<tr>' + cols.map(([k, , n]) =>
+      `<td class="${n ? 'num' : ''}">${n ? (typeof r[k] === 'number' ? (k === 'n_cp' || k === 'n_faces' || k === 'refinements' ? r[k] : fmt(r[k], k === 'runtime_s' ? 0 : 2)) : '–') : r[k]}</td>`).join('') + '</tr>').join('');
+  };
+  table.tHead.querySelectorAll('th').forEach(th => th.onclick = () => { asc = sortKey === th.dataset.k ? !asc : true; sortKey = th.dataset.k; draw(); });
+  draw();
+}
+</script>
+</body>
+</html>

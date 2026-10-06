@@ -98,7 +98,8 @@ class LocalRefine(Rewrite):
             for k in range(1, n + 1):
                 t = k / (n + 1)
                 f = state.cx.faces[target]
-                existing = bb.interior_knots(f.knots_u if axis == "u" else f.knots_v, 3)
+                existing = bb.interior_knots(f.knots_u if axis == "u" else f.knots_v,
+                                             f.degree_u if axis == "u" else f.degree_v)
                 if len(existing) and np.min(np.abs(existing - t)) < 0.25 / (n + 1):
                     continue  # avoid near-duplicate knots on already refined faces
                 reason = insert_knot_in_place(state, target, axis, t)
@@ -125,7 +126,7 @@ def refine_boundary_carriers(state: CADState, fid: int, min_gap: float = 0.02) -
     for side in SIDES:
         knots = f.side_knots(side)
         for run in cx.side_runs(f, side):
-            for t in np.unique(np.round(bb.interior_knots(knots, 3), 12)):
+            for t in np.unique(np.round(bb.interior_knots(knots, f.side_degree(side)), 12)):
                 if run.a + TOL < t < run.b - TOL:
                     sc = run.s_a + (t - run.a) * (run.s_b - run.s_a) / (run.b - run.a)
                     todo.append((run.carrier, float(sc)))

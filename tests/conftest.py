@@ -1,4 +1,3 @@
-import numpy as np
 import pytest
 
 from cad_d4d.geometry.builders import build_cube_complex, sphere_map

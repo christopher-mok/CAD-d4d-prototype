@@ -143,7 +143,6 @@ def test_local_refine_exact_and_local():
 def local_support_fraction(state, fid, n=60):
     """Fraction of the root-face parameter area influenced by the interior DOFs of ``fid``."""
     f = state.cx.faces[fid]
-    dm = state.dof_map
     from cad_d4d.geometry.patch import basis
     t = np.linspace(0, 1, n)
     Bu = basis(f.knots_u, 3, t)[:, 1:-1]

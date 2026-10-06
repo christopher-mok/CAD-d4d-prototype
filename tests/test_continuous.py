@@ -1,12 +1,11 @@
 """Milestone 4: synthetic targets, losses, continuous fitting, validity."""
 import numpy as np
-import pytest
 import torch
 
 from cad_d4d.device import to_numpy, to_tensor
 from cad_d4d.geometry.state import watertightness_error
 from cad_d4d.geometry.tessellation import SamplingConfig, SurfaceSampler
-from cad_d4d.geometry.validity import jacobian_check, self_intersections
+from cad_d4d.geometry.validity import jacobian_check
 from cad_d4d.losses.coverage import coverage_loss
 from cad_d4d.losses.objective import ObjectiveConfig, ShapeObjective
 from cad_d4d.optimization.continuous import ContinuousOptimizer

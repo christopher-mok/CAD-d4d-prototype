@@ -15,12 +15,10 @@ applied sequentially; each later one is re-applied to the updated state.
 """
 from __future__ import annotations
 
-import copy
 import dataclasses
 import time
 from dataclasses import dataclass, field
 
-import numpy as np
 
 from ..geometry.state import BirthRecord, CADState
 from ..losses.complexity import complexity_delta, effective_complexity, structural_complexity
@@ -60,25 +58,44 @@ class SRDResult:
     runtime: float
 
 
-def polish_continuous(obj: ShapeObjective, state: CADState, steps: int, cont: ContinuousConfig) -> list:
+def polish_continuous(obj: ShapeObjective, state: CADState, steps: int, cont: ContinuousConfig,
+                      callback=None) -> list:
     """Final continuous phase against the exact narrow-band SDF.
 
     The trilinear SDF is the better objective while the surface is still far from
     sharp target features (the exact field's kinks then pull boundary rows into
     folds); near convergence the exact field removes the trilinear bias.
     """
-    pcfg = copy.deepcopy(obj.cfg)
-    pcfg.sdf_eval = "exact"
-    return ContinuousOptimizer(ShapeObjective(obj.target, pcfg), cont).run(state, steps)
+    pcfg = dataclasses.replace(obj.cfg, sdf_eval="exact")  # shallow: physics terms are shared, not copied
+    return ContinuousOptimizer(ShapeObjective(obj.target, pcfg), cont).run(state, steps, callback=callback)
+
+
+def rank_candidates(scored: list, rank_by: str, threshold: float) -> list[int]:
+    """Indices of acceptable candidates (ok and score > threshold), best first.
+
+    ``score``: by score. ``ratio``: refinements by score per added complexity unit
+    (greedy knapsack: prefer the most gain per new DOF), simplifications by score;
+    refinements and simplifications have separate per-round caps anyway.
+    """
+    ok = [i for i, s in enumerate(scored) if s.ok and s.score > threshold]
+    if rank_by == "score":
+        return sorted(ok, key=lambda i: -scored[i].score)
+    if rank_by == "ratio":
+        def key(i):
+            s = scored[i]
+            dC = s.info.get("delta_complexity", 0.0)
+            return -(s.score / dC if s.rewrite.refinement and dC > 0 else s.score)
+        return sorted(ok, key=key)
+    raise ValueError(rank_by)
 
 
 class SRD:
     def __init__(self, objective: ShapeObjective, cfg: SRDConfig | None = None):
         self.cfg = cfg or SRDConfig()
-        ocfg = copy.deepcopy(objective.cfg)
-        # Grace periods are part of scoring mode C only.
-        ocfg.complexity = dataclasses.replace(ocfg.complexity,
-                                              use_grace=self.cfg.scoring.mode == "marginal_birth")
+        # Grace periods are part of scoring mode C only. Shallow config copy: physics terms
+        # (FEM operators, warm starts) are shared with the caller, not duplicated.
+        ocfg = dataclasses.replace(objective.cfg, complexity=dataclasses.replace(
+            objective.cfg.complexity, use_grace=self.cfg.scoring.mode == "marginal_birth"))
         self.obj = ShapeObjective(objective.target, ocfg)
         self.opt = ContinuousOptimizer(self.obj, self.cfg.continuous)
         self.scorer = RewriteScorer(self.obj, self.opt, self.cfg.scoring)
@@ -90,7 +107,8 @@ class SRD:
         r["n_birth_young"] = sum(1 for b in state.birth_records if b.remaining > 0 and b.age < self.obj.cfg.complexity.grace_steps)
         return r
 
-    def run(self, state: CADState, callback=None) -> SRDResult:
+    def run(self, state: CADState, callback=None, recorder=None) -> SRDResult:
+        """Run SRD. ``recorder`` (visualization.recording.Recorder) captures frames/events for replay."""
         cfg = self.cfg
         t0 = time.perf_counter()
         state = state.copy()
@@ -99,8 +117,11 @@ class SRD:
         pending_cf: list[tuple[int, CADState, int]] = []
         step = 0
         cc = self.obj.cfg.complexity
+        if recorder is not None:
+            recorder.frame(state, state.values(), 0, 0, self.obj.report(state))
         for rnd in range(cfg.rounds):
-            logs = self.opt.run(state, cfg.steps_per_round)
+            hook = recorder.step_hook(state, step, rnd) if recorder is not None else None
+            logs = self.opt.run(state, cfg.steps_per_round, callback=hook)
             C = structural_complexity(state, cc)
             C_eff = effective_complexity(state, cc)
             for lg in logs:
@@ -121,6 +142,10 @@ class SRD:
             snap.update(round=rnd, step=step)
             if cfg.discrete and rnd >= cfg.warmup_rounds and rnd < cfg.rounds - 1:
                 state, rnd_props, rnd_events = self.discrete_phase(state, rnd, step)
+                if recorder is not None:
+                    recorder.discrete(step, rnd, rnd_props, rnd_events)
+                    if rnd_events:  # structure changed: snapshot the exact (unchanged) geometry
+                        recorder.frame(state, state.values(), step, rnd, self.obj.report(state))
                 proposals += rnd_props
                 events += rnd_events
                 n_cf_done = sum(1 for e in events[: len(events) - len(rnd_events)] if e["refinement"])
@@ -135,7 +160,10 @@ class SRD:
             if callback:
                 callback(rnd, state, snap)
         if cfg.polish_steps > 0:
-            polish_continuous(self.obj, state, cfg.polish_steps, cfg.continuous)
+            hook = recorder.step_hook(state, step, cfg.rounds) if recorder is not None else None
+            polish_continuous(self.obj, state, cfg.polish_steps, cfg.continuous, callback=hook)
+        if recorder is not None:
+            recorder.frame(state, state.values(), step + cfg.polish_steps, cfg.rounds, self.obj.report(state))
         return SRDResult(state, history, rounds, proposals, events, cfs, time.perf_counter() - t0)
 
     # ------------------------------------------------------------------
@@ -153,15 +181,13 @@ class SRD:
                          "location": None if loc is None else loc.tolist(),
                          "ok": sc.outcome.ok, "accepted": False, "status": "rejected",
                          **{k: v for k, v in sc.info.items()}})
-        order = sorted(range(len(scored)), key=lambda i: -scored[i].score)
+        order = rank_candidates(scored, cfg.scoring.rank_by, cfg.accept_threshold)
         touched: set[int] = set()
         n_ref = n_simp = 0
         events = []
         current = state
         for i in order:
             sc = scored[i]
-            if not sc.ok or sc.score <= cfg.accept_threshold:
-                break
             rw = sc.rewrite
             if rw.refinement and n_ref >= cfg.max_refine_per_round:
                 logs[i]["status"] = "cap"

@@ -1,19 +1,15 @@
 """Benchmark infrastructure: target generators and comparison math."""
 import math
-import sys
-from pathlib import Path
 
 import numpy as np
 import pytest
 
+from cad_d4d.benchmark.analysis import compare, interp_loglog
 from cad_d4d.device import to_numpy
 from cad_d4d.geometry.state import watertightness_error
 from cad_d4d.targets import analytic as A
 from cad_d4d.targets.random_grammar import GrammarSpec, random_grammar_state
 from cad_d4d.targets.synthetic import TargetConfig
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "experiments"))
-from benchmark import compare, interp_loglog  # noqa: E402
 
 
 def test_mesh_radial_sphere_volume_and_orientation():
