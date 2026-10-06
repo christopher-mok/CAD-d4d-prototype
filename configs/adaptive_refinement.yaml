@@ -1,0 +1,47 @@
+# Baseline adaptive-refinement experiment (python experiments/adaptive_refinement.py)
+seed: 0
+srd_seeds: [0, 1, 2]   # adaptive methods are stochastic: report medians
+output_dir: experiments/output
+
+target:
+  face_index: 0          # cube face carrying the localized feature
+  uv: [0.5, 0.5]
+  width: 0.4             # root-face parameter width of the refined window
+  height: 0.25           # bump height along the face normal
+  refine_knots: 2
+  global_scale: [1.1, 0.95, 0.9]   # global deformation the coarse model CAN represent
+  sdf_res: 64
+  n_coverage: 3000
+
+budget:
+  rounds: 14
+  steps_per_round: 40
+
+objective:
+  lambda_sdf: 1.0
+  lambda_coverage: 1.0
+  lambda_normal: 0.0
+  lambda_fair: 2.0e-8
+  complexity:
+    c_face: 1.0
+    c_cp: 1.0
+    lambda_complex: 1.0e-6
+    lambda_birth: 1.0e-7
+    hold_steps: 40
+    ramp_steps: 40
+
+continuous:
+  eta: 0.5
+
+proposals:
+  n_refine: 8
+  n_simplify: 12
+  eps_remove: 5.0e-3
+  eps_merge: 5.0e-3
+
+srd:
+  max_refine_per_round: 1
+  max_simplify_per_round: 2
+  track_counterfactual: 2
+
+uniform_knots: [1, 3]    # fixed uniformly refined baselines (interior knots per direction)
