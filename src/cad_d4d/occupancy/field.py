@@ -24,7 +24,7 @@ import math
 import torch
 
 from ..geometry.distance import closest_point_on_triangle
-from ..losses.coverage import nearest_centroids
+from ..losses.coverage import candidate_triangles
 
 
 def solid_angles(Q: torch.Tensor, A: torch.Tensor, B: torch.Tensor, C: torch.Tensor) -> torch.Tensor:
@@ -59,7 +59,7 @@ def winding_number(Q: torch.Tensor, X: torch.Tensor, tri: torch.Tensor, q_chunk:
 def unsigned_distance(Q: torch.Tensor, X: torch.Tensor, tri: torch.Tensor, k: int = 8) -> torch.Tensor:
     """Distance from Q to the mesh, differentiable w.r.t. X (candidate search is detached)."""
     A, B, C = X[tri[:, 0]], X[tri[:, 1]], X[tri[:, 2]]
-    nn = nearest_centroids(Q, ((A + B + C) / 3).detach(), k)
+    nn = candidate_triangles(Q, X.detach(), tri, k)
     Qk = Q[:, None, :].expand(-1, nn.shape[1], -1)
     cp = closest_point_on_triangle(Qk, A[nn], B[nn], C[nn])
     return torch.sqrt(((cp - Qk) ** 2).sum(-1).min(dim=1).values + 1e-30)

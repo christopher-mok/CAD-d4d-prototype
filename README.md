@@ -13,9 +13,10 @@ coarse patch --LocalRefine/KnotInsert--> same surface, more DOFs --descent--> be
 ```
 
 This is milestone 1 of a longer program (CSG -> fixed-grid FEM -> AddBody/AddCavity ->
-Bridge/Pinch), plus the first bridge piece: a differentiable occupancy of the explicit solid
-on a fixed grid. Out of scope for now: trimmed NURBS, rational weights, STEP import,
-booleans, FEM, and topology surgery.
+Bridge/Pinch). Beyond shape fitting, the explicit solid now drives fixed-grid linear
+elasticity: a differentiable occupancy feeds an ersatz-material FEM, and compliance gradients
+flow back to the control points. Out of scope for now: trimmed NURBS, rational weights, STEP
+import, booleans, and topology surgery (AddBody/AddCavity, Bridge/Pinch).
 
 **Device.** All per-step work (proxy, losses, gradients, validity checks, occupancy) runs in
 float64 on CUDA when available. Set `CAD_D4D_DEVICE=cpu` to force the CPU. Structure
@@ -26,20 +27,34 @@ uploaded once.
 
 ```bash
 pip install -e .[test]            # numpy, scipy, torch, matplotlib, pyyaml, pytest
-python -m pytest                  # 74 tests, ~50 s on GPU (CAD_D4D_DEVICE=cpu: ~2 min)
-python experiments/adaptive_refinement.py          # full baseline, 3 SRD seeds (~10 min on GPU)
-python experiments/adaptive_refinement.py --quick  # smoke run (~1.5 min on GPU)
+python -m pytest                  # 92 tests, ~1 min on GPU (CAD_D4D_DEVICE=cpu: ~3 min)
+python experiments/adaptive_refinement.py [--record]   # single-target baseline, 3 SRD seeds (~10 min)
+python experiments/benchmark.py --split test --tag v2 --report --dashboard   # 13-target benchmark
+python experiments/compliance_shape.py                 # FEM: compliance-driven cantilever (~1 min)
+python -m cad_d4d.visualization.web --recording run.json --benchmark experiments/benchmark_out/results.jsonl -o viewer.html
 ```
 
-Outputs go to `experiments/output/`: `metrics.md/json`, `history.png`,
-`fit_vs_control_points.png`, per-method `state_*.png`, `exact_refinement_log.csv`,
-`events_C.json` and `proposals_C.json`.
+Outputs go to `experiments/output/` (baseline: `metrics.md/json`, plots, `exact_refinement_log.csv`,
+`events_C.json`, and with `--record` an interactive `viewer.html`) and `experiments/benchmark_out/`
+(`results.jsonl` cache, `report_<tag>.md`, `pareto_<tag>.png`, `dashboard.html`).
+
+**Interactive viewer.** `viewer.html` is a single self-contained page (data embedded; three.js and
+Plotly load from a CDN):
+- *Run replay*: orbit the target and the fitted surface; toggle patch boundaries, control nets,
+  control points (vertex / edge-curve / face), and the residual heatmap or refined faces. A
+  timeline replays the run (play, step, jump to the next rewrite). The panel shows every
+  proposal of the current discrete phase with its score and B_refine, the accepted rewrites,
+  and loss / control-point curves.
+- *Benchmark*: per-target Pareto charts (fit vs. control points) of adaptive runs against the
+  uniform-refinement curve, summary statistics, and a sortable table of all runs.
 
 ## Repository layout
 
 ```
 configs/adaptive_refinement.yaml   experiment configuration
-experiments/adaptive_refinement.py baseline experiment (6 methods)
+experiments/adaptive_refinement.py baseline experiment (6 methods, single target)
+experiments/benchmark.py           13 held-out + 2 tuning targets vs. uniform refinement (resumable)
+experiments/compliance_shape.py    FEM demo: compliance-driven shape optimization
 src/cad_d4d/
   geometry/     what the CAD object is
     bspline_basis.py  Cox-de Boor basis/derivatives, Boehm insertion, refinement and
@@ -57,16 +72,25 @@ src/cad_d4d/
     split_face.py   SplitFace (exact)           merge_face.py   MergeFace (provenance + epsilon)
     split_edge.py   SplitEdge / MergeEdge (exact, topological)
     local_refine.py LocalRefine = exact splits isolating a window + refinement of that child only
+                    (optionally also refining the window's carriers); FaceRefine = bisect all spans
   losses/       evaluate geometry
-    target_sdf.py (SDF grid, trilinear), coverage.py, normals.py, fairness.py, complexity.py, objective.py
+    target_sdf.py (SDF grid: trilinear + exact narrow band), coverage.py, normals.py, fairness.py,
+    complexity.py, objective.py (shape terms + volume + pluggable physics terms)
   optimization/ how to move through the continuous and discrete design space
-    continuous.py (preconditioned GD, Armijo and validity backtracking), preconditioner.py (lumped mass),
+    continuous.py (preconditioned GD, Armijo and validity backtracking),
+    preconditioner.py (lumped mass / semi-implicit with the fairness Hessian),
     proposal_sampling.py, rewrite_scoring.py (modes A/B/C), srd.py, discretization.py
   occupancy/field.py     winding number, signed distance to the shell, soft occupancy on a fixed grid,
                          exact enclosed volume (all differentiable in the control points)
-  targets/synthetic.py   grammar-generated targets (program discarded after freezing)
+  physics/fem.py         fixed-grid trilinear elasticity, matrix-free PCG, adjoint compliance
+  physics/terms.py       ComplianceTerm: control points -> occupancy -> compliance
+  targets/               synthetic.py (frozen targets), random_grammar.py (reachable multi-feature
+                         targets), analytic.py (out-of-grammar radial shapes)
+  benchmark/             suite.py (target catalog), runner.py (methods, exact metric, cache),
+                         analysis.py (comparison against the uniform curve)
   device.py              compute device / dtype
-  visualization/viewer.py
+  visualization/         viewer.py (matplotlib), recording.py (Recorder), web.py +
+                         viewer_template.html (interactive replay + dashboard)
 tests/                   one file per milestone
 ```
 

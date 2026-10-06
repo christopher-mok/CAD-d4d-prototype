@@ -93,6 +93,13 @@ class ContinuousOptimizer:
                 ok = n_hit == 0
         return ok, info
 
+    def self_intersections(self, disc: Discretization, P: torch.Tensor) -> int:
+        """Number of nonlocal self-intersections of the configuration P (0 if the check is disabled)."""
+        if not self.cfg.validity.check_self_intersection:
+            return 0
+        with torch.no_grad():
+            return disc.count_self_intersections(disc.check.evaluate(to_tensor(P))[0])
+
     def reference_normals(self, disc: Discretization, P: torch.Tensor) -> torch.Tensor:
         with torch.no_grad():
             _, Xu, Xv = disc.check.evaluate(to_tensor(P))
@@ -110,6 +117,7 @@ class ContinuousOptimizer:
         t = eta
         log = {"loss": L0, "sdf": float(gi.terms["sdf"]), "coverage": float(gi.terms["coverage"]),
                "fair": float(gi.terms["fair"]), "D": gd, "backtracks": 0, "invalid": 0}
+        n_cur = None  # self-intersections of the current configuration (computed only if needed)
         for k in range(cfg.max_backtracks):
             P_try = P.detach() - t * d
             ok, _ = self.is_valid(disc, P_try, ref, local=True, nonlocal_=False)
@@ -117,7 +125,14 @@ class ContinuousOptimizer:
                 with torch.no_grad():
                     L1 = float(self.obj.terms(state, P_try, disc)["smooth"])
                 if L1 <= L0 - cfg.armijo_c * t * gd:
-                    ok, _ = self.is_valid(disc, P_try, ref, local=False, nonlocal_=True)
+                    ok, info = self.is_valid(disc, P_try, ref, local=False, nonlocal_=True)
+                    if not ok:
+                        # Monotone rule: a step may not *add* self-intersections. A state that already
+                        # contains one (e.g. a fold revealed when a rewrite re-sampled the check
+                        # tessellation) must not freeze the optimizer: it may move, and unfold.
+                        if n_cur is None:
+                            n_cur = self.self_intersections(disc, P.detach())
+                        ok = info.get("n_self_intersections", 0) <= n_cur
                     if ok:
                         log.update(eta=t, new_loss=L1, backtracks=k)
                         return P_try, log

@@ -47,9 +47,31 @@ class ProposalConfig:
     local_widths: tuple = (0.25, 0.4)  # in root-face parameter units
     local_refine_knots: tuple = (1, 2)
     p_refine_boundary: float = 0.5  # share of LocalRefine proposals that also refine the window's carriers
+    # Coarse-to-fine schedule: for the first N discrete phases only *global* refinements
+    # (FaceRefine, CarrierKnotInsert) are proposed. Local windows have the highest immediate
+    # gain per DOF, so a myopic score commits to them early even when the misfit is global.
+    global_first_rounds: int = 0
+    global_kinds: tuple = ("FaceRefine", "CarrierKnotInsert")
+    # Residual-adaptive scale (default on): if the residual is *spread* -- the smallest
+    # area fraction holding half of the residual energy exceeds ``spread_threshold`` --
+    # the phase proposes global refinements only; concentrated residuals get local windows.
+    # Threshold 0.04 = geometric mean of the two tuning targets' spreads (0.013 grammar /
+    # 0.127 analytic) after the first continuous phase.
+    adaptive_scale: bool = True
+    spread_threshold: float = 0.04
     min_knot_gap: float = 0.04
     eps_remove: float = 5e-3
     eps_merge: float = 5e-3
+
+
+def residual_spread(rf: dict) -> float:
+    """Smallest area fraction holding half of the residual energy sum_s w_s e_s^2 (0 if no residual)."""
+    en = rf["w"] * rf["e"] ** 2
+    if en.sum() <= 0:
+        return 0.0
+    order = np.argsort(-en)
+    k = int(np.searchsorted(np.cumsum(en[order]) / en.sum(), 0.5))
+    return float(rf["w"][order[: k + 1]].sum() / rf["w"].sum())
 
 
 def residual_field(objective: ShapeObjective, state: CADState, terms: dict) -> dict:
@@ -88,6 +110,7 @@ class ProposalSampler:
 
     def location_probabilities(self, objective, state, terms) -> np.ndarray:
         rf = residual_field(objective, state, terms)
+        self.last_spread = residual_spread(rf)
         if self.cfg.mode == "uniform":
             p = rf["w"].copy()
         elif self.cfg.mode == "residual":
@@ -99,11 +122,16 @@ class ProposalSampler:
         p = np.maximum(p, 0)
         return p / p.sum()
 
-    def refinements(self, objective: ShapeObjective, state: CADState, terms: dict) -> list:
+    def refinements(self, objective: ShapeObjective, state: CADState, terms: dict, phase: int = 10**9) -> list:
+        """Refinement proposals; ``phase`` counts discrete phases (for the coarse-to-fine schedule)."""
         cfg = self.cfg
         sm = objective.disc(state).sampler
         prob = self.location_probabilities(objective, state, terms)
         kinds = [k for k, w in cfg.kind_weights.items() if w > 0]
+        global_phase = phase < cfg.global_first_rounds or (
+            cfg.adaptive_scale and "phi" in terms and self.last_spread > cfg.spread_threshold)
+        if global_phase:
+            kinds = [k for k in kinds if k in cfg.global_kinds] or kinds
         kw = np.array([cfg.kind_weights[k] for k in kinds], float)
         kw /= kw.sum()
         out = []

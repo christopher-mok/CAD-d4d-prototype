@@ -57,3 +57,30 @@ def test_copied_state_reuses_a_consistent_dof_map():
     assert abs(c.dof_map.E - fresh.E).max() == 0
     c.set_values(c.values() + 1.0)
     assert not np.allclose(s.values(), c.values())  # values are independent
+
+
+def test_monotone_self_intersection_rule(reachable_target, coarse_sphere, monkeypatch):
+    """Steps may not add self-intersections, but a state that already has some (e.g. a fold
+    revealed when a rewrite re-samples the check tessellation) must not freeze the optimizer."""
+    from cad_d4d.optimization.discretization import Discretization
+    obj = ShapeObjective(reachable_target, ObjectiveConfig())
+    opt = ContinuousOptimizer(obj)
+
+    s = coarse_sphere.copy()
+    monkeypatch.setattr(Discretization, "count_self_intersections", lambda self, X, return_hits=False: 3)
+    logs = opt.run(s, 5)  # pre-existing, not worsened
+    assert all(l["eta"] > 0 for l in logs)
+
+    import torch
+    from cad_d4d.device import to_tensor
+    s = coarse_sphere.copy()
+    P0 = to_tensor(s.values())
+    disc = obj.disc(s)
+    X_cur = disc.check.evaluate(P0)[0]
+
+    def growing(self, X, return_hits=False):  # every trial looks worse than the current state
+        return 3 if torch.equal(X, X_cur) else 4
+
+    monkeypatch.setattr(Discretization, "count_self_intersections", growing)
+    P_new, log = opt.step(s, P0, 0.5, disc)
+    assert P_new is None and log["invalid"] > 0

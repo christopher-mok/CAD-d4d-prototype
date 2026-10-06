@@ -109,6 +109,14 @@ class SurfaceSampler:
         self.sample_face_t = torch.as_tensor(self.sample_face, dtype=torch.long, device=dev)
         self.sample_boundary_t = torch.as_tensor(self.sample_boundary, device=dev)
 
+    @property
+    def star(self) -> torch.Tensor:
+        """Incident triangles per sample (cached; used for robust closest-triangle candidates)."""
+        if getattr(self, "_star", None) is None:
+            from ..losses.coverage import vertex_star
+            self._star = vertex_star(self.tri_t, self.n_samples)
+        return self._star
+
     def evaluate(self, P: torch.Tensor):
         """Returns (X, X_u, X_v), each (n_samples, 3), differentiable in P."""
         return torch.sparse.mm(self.G, P), torch.sparse.mm(self.Gu, P), torch.sparse.mm(self.Gv, P)

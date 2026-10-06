@@ -33,7 +33,7 @@ class ObjectiveConfig:
     volume_target: float | None = None  # defaults to the target shape's volume
     physics: list = field(default_factory=list)  # differentiable terms: callable(state, P, disc, terms) with .weight
     sdf_eval: str = "trilinear"  # "trilinear" (smooth, used for optimization) | "exact" (narrow band)
-    coverage_k: int = 6
+    coverage_k: int = 8
     complexity: ComplexityConfig = field(default_factory=ComplexityConfig)
     discretization: DiscretizationConfig = field(default_factory=DiscretizationConfig)
 
@@ -68,7 +68,7 @@ class ShapeObjective:
             cs = disc.coverage
             Xc = X if cs is sm else torch.sparse.mm(cs.G, P)
             out["coverage"], out["cov_d"], _ = coverage_loss(
-                self.target.points, Xc, cs.tri_t, cfg.coverage_k)
+                self.target.points, Xc, cs.tri_t, cfg.coverage_k, cs.star)
         else:
             out["coverage"] = zero
         if cfg.lambda_normal > 0 and self.target is not None:

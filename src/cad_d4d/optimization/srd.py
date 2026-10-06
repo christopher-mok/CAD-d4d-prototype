@@ -20,6 +20,7 @@ import time
 from dataclasses import dataclass, field
 
 
+from ..device import to_tensor
 from ..geometry.state import BirthRecord, CADState
 from ..losses.complexity import complexity_delta, effective_complexity, structural_complexity
 from ..losses.objective import ShapeObjective
@@ -170,7 +171,8 @@ class SRD:
     def discrete_phase(self, state: CADState, rnd: int, step: int):
         cfg = self.cfg
         ctx = self.scorer.prepare(state)
-        props = self.sampler.refinements(self.obj, state, ctx.gi.terms) + self.sampler.simplifications(state)
+        props = (self.sampler.refinements(self.obj, state, ctx.gi.terms, phase=rnd - cfg.warmup_rounds)
+                 + self.sampler.simplifications(state))
         scored: list[ScoredRewrite] = [self.scorer.score(ctx, rw) for rw in props]
         if cfg.lookahead_steps > 0:
             self.lookahead(ctx, scored)
@@ -186,6 +188,7 @@ class SRD:
         n_ref = n_simp = 0
         events = []
         current = state
+        n_cur = None  # self-intersections of ``current`` (lazily computed)
         for i in order:
             sc = scored[i]
             rw = sc.rewrite
@@ -204,6 +207,14 @@ class SRD:
                 logs[i]["status"] = "reapply_failed"
                 continue
             new = out.state
+            # Validity gate: the new structure's check tessellation may reveal (or a refit may
+            # create) self-intersections; never accept a rewrite that adds any.
+            if n_cur is None:
+                n_cur = self.opt.self_intersections(self.obj.disc(current), to_tensor(current.values()))
+            n_new = self.opt.self_intersections(self.obj.disc(new), to_tensor(new.values()))
+            if n_new > n_cur:
+                logs[i]["status"] = "invalid"
+                continue
             dC = complexity_delta(current, new, self.obj.cfg.complexity)
             event = {"round": rnd, "step": step, "kind": rw.kind, "refinement": rw.refinement,
                      "exact": rw.exact, "score": sc.score, "delta_complexity": dC,
@@ -222,7 +233,8 @@ class SRD:
                 event["simplified_records"] = mark_simplified(current, new, rw, -dC)
                 n_simp += 1
             touched |= t_faces
-            current = new
+            new.meta["eta"] = cfg.continuous.eta  # conditioning changes with structure: restart the step size
+            current, n_cur = new, n_new
             logs[i]["accepted"] = True
             logs[i]["status"] = "accepted"
             events.append(event)
