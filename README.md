@@ -92,7 +92,15 @@ src/cad_d4d/
   device.py              compute device / dtype
   visualization/         viewer.py (matplotlib), recording.py (Recorder), web.py +
                          viewer_template.html (interactive replay + dashboard)
-tests/                   one file per milestone
+  csg/                   topology search prototype on CSG solids (separate representation):
+    primitives.py (Sphere, oriented rounded Box, Capsule; exact SDFs), solid.py (canonical
+    union-minus-union form, Grid), mesh.py (welded marching tetrahedra), measure.py (voxel +
+    mesh topology), objective.py (volume/surface/complexity, Adam fit), residuals.py,
+    grammar.py (8 rewrites + OpenCavity), proposals.py, search.py (matched trials),
+    targets.py (cases, families, oracle), viewer.py + viewer_template.html
+experiments/topology_search.py     topology search: 7 end-to-end cases, held-out benchmark
+experiments/make_figures.py        PNGs in docs/images
+tests/                   one file per milestone (test_csg_* for the topology prototype)
 ```
 
 ## Key design decisions
@@ -272,7 +280,84 @@ points on the shape's medial axis have non-differentiable distances (tied closes
 | test_fem | element stiffness (symmetric, 6 rigid modes), exact bar solution, compliance gradient vs. FD (densities and control points), compliance-driven shape optimization |
 | test_benchmark | analytic/grammar target generators, comparison math |
 | test_viewer | recorder frames/structures/events, safe HTML embedding |
-| test_review_fixes | separable refit = dense LS, no double birth-record charge, DOF map reuse on copy, monotone self-intersection rule |
+| test_review_fixes | separable refit = dense LS, no double birth-record charge, DOF map reuse on copy, monotone self-intersection rule, contact freezing |
+| test_csg_measure | SDF signs, union/difference, copy isolation, canonical form; components/cavities/tunnels/genus of known solids at two resolutions; cavity vs. exterior-connected void; voxel conventions, tiny components; welded mesh, triangle soup and non-manifold meshes report no genus; open surfaces |
+| test_csg_grammar | every rewrite's effect and failing preconditions, inverses on original (not just recent) features, plug variants, split pinch, inputs never mutated, failures reported not substituted |
+| test_csg_search | residual direction (missing vs. excess), cavity vs. channel evidence, resolution-independent objective, trial isolation and equal budgets, rejection keeps the optimized baseline, acceptance with provenance, inverse-edit protection |
+| test_csg_e2e | 7 end-to-end reconstructions with topology at 2 resolutions, offset robustness (+-0.03), IoU, and a measured grammar edit |
+
+## Topology search prototype (CSG)
+
+The B-spline patch complex keeps its topology fixed: its grammar refines and simplifies
+geometry, but cannot add a hole, a cavity or a second body. `cad_d4d.csg` is a first milestone
+for **residual-guided topology search**, on a separate CSG/implicit representation. Its
+results are **CSG reconstructions, not editable B-spline CAD**; conversion is future work (below).
+
+```bash
+python -m pytest tests/test_csg_measure.py tests/test_csg_grammar.py tests/test_csg_search.py tests/test_csg_e2e.py  # ~45 s, CPU
+python experiments/topology_search.py cases               # 7 end-to-end cases (~30 s)
+python experiments/topology_search.py bench --split test  # held-out benchmark (~3 min)
+python experiments/topology_search.py bench --split tune  # development seeds
+python experiments/make_figures.py topology               # docs/images/topology_cases.png
+```
+
+Outputs go to `experiments/topology_out/<cases|test|tune>/`: `results.jsonl`, `report.md`,
+`meshes/*.obj` (target and every reconstruction), and `viewer.html`. The viewer shows target vs.
+reconstruction after each accepted edit, missing/excess-material voxels, and every candidate
+with its score or failure reason.
+
+**Representation.** `S = (M_1 u ... u M_m) \ (V_1 u ... u V_v)`: material and void features, one
+primitive each (sphere, oriented rounded box, capsule; trainable position, size, orientation).
+`sdf < 0` inside; union = min, difference = `max(d, -d_void)`. Hard occupancy `sdf < 0`; soft
+occupancy `sigmoid(-sdf / eps)`, eps = 0.03 in world units. The flat two-level form is the
+canonical expression: edits add or remove features and never nest, and features that no
+longer change the occupancy are dropped every round (logged). Limitation: no material inside a
+void, so nested shells are not representable.
+
+**Grammar.** Material side: AddBody, RemoveBody, BridgeBodies, PinchBody (slab or split
+variant). Void side: AddCavity, RemoveCavity (remove the void feature, or plug a cavity formed
+by material), BridgeVoid / OpenCavity, CloseTunnel (remove the channel feature, or plug a
+handle formed by material). Each operation checks preconditions and edits a copy. It then
+*measures* topology before and after on a check grid, and fails with the measured counts
+unless its stated effect happened. Semantics and preconditions are in the `grammar.py`
+docstring. Inverses target any existing feature or measured void, not only the latest edit.
+
+**Proposals.** From `r_add = max(rho_t - rho, 0)` and `r_remove = max(rho - rho_t, 0)`: connected
+regions (6-connected, residual > 0.5). For each: volume, centroid, PCA axes and half-extents,
+inscribed ball, contact patches with material components, the exterior void and cavities,
+whether removing it disconnects material, and overlap with existing features. Rules map this
+evidence to edits at two scales (`proposals.py`), capped at 8 per round. Nothing reads target
+genus, shell counts, labels or construction history.
+
+**Scoring.** Matched trials. The baseline (no edit) and every candidate are optimized for the same
+K = 60 Adam steps from independent copies; `score = F(baseline) - F(candidate)` with
+`F = L_volume + 0.05 L_surface + 1e-3 * #features`. The best candidate is accepted only if
+`score > 2e-4 + 0.02 F(baseline)`; its optimized state is committed, otherwise the optimized
+baseline. Accepted features carry provenance; inverse edits near or on them are blocked for 2
+rounds. `L_volume` is a cell mean and `L_surface` a band-weighted mean, so neither depends on
+grid resolution (tested). This trial scoring is separate from the gradient-based marginal
+scoring of exact B-spline refinements.
+
+**Topology measurement.** Voxels: material 26-connected (closed cubes), void 6-connected.
+Components; cavities = void components not reaching the padded border; Euler characteristic of
+the cubical complex; tunnels `b1 = b0 + b2 - chi`. Components below 8 voxels are reported
+separately as tiny. Meshes: marching tetrahedra on a Freudenthal split, welded by lattice edge;
+closedness and vertex-manifoldness are checked before shells, chi and genus are reported. A
+result counts as `stable` only if mesh and voxel measurements agree at two resolutions; otherwise
+genus is reported as unknown, not guessed. Counts depend on resolution: features thinner than
+~2 cells can vanish or merge.
+
+**Toward B-spline CAD (future work).** A CSG result fixes the *topology* a B-spline model must
+have: components, cavities and handles, plus where they are. A converter could
+1. extract a quad-dominant surface layout per shell, for example from a cross field on the
+   reconstruction's mesh, with the genus fixing the number of irregular vertices;
+2. build an untrimmed patch complex on that layout;
+3. fit it to the CSG SDF;
+4. hand it to the existing SRD loop for adaptive refinement.
+
+A tighter integration would run the topology trials directly on patch complexes, using
+handle-attachment and shell-splitting rewrites that keep watertightness. None of this is
+implemented.
 
 ## Results
 

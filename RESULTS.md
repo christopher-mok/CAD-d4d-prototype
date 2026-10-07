@@ -199,3 +199,90 @@ against finite differences in `tests/test_fem.py`.
   6.7 ms and loss + gradient from 25 to 15 ms. Uniform k=3 / k=5 runs are back to 20 s / 31 s
   (v2: 18 s / 26 s; v3: 32 s / 54 s), with identical fits. Continuity was verified: 200 random
   1e-9 perturbations of a refined, merged structure change the loss by at most 1.6e-11.
+
+## 6. Topology search on CSG solids (`experiments/topology_search.py`)
+
+A separate prototype (`cad_d4d.csg`; README, "Topology search prototype"). The reconstructions
+are **CSG solids, not B-spline CAD**. Everything runs on the CPU in float64:
+- optimization grid 32^3;
+- evaluation on independent grids (IoU and surface error at 64^3, offset; topology at 56^3 and
+  80^3);
+- budgets per run: at most 6 rounds; K = 60 Adam steps per trial (baseline and each candidate);
+  150 final steps; at most 8 candidates per round.
+
+### End-to-end cases (`python experiments/topology_search.py cases`)
+
+![Topology cases](docs/images/topology_cases.png)
+
+| case | initialized as | accepted edit | result: components / cavities / genus | IoU | wall |
+|---|---|---|---|---|---|
+| enclosed cavity | solid box | AddCavity | 1 / 1 / 0 (target 1 / 1 / 0) | 1.000 | 3.0 s |
+| through-tunnel | solid box | BridgeVoid | 1 / 0 / 1 (1 / 0 / 1) | 1.000 | 2.8 s |
+| two bodies | one box | PinchBody (split) | 2 / 0 / 0 (2 / 0 / 0) | 0.957 | 4.9 s |
+| needs a bridge | two balls | BridgeBodies | 1 / 0 / 0 (1 / 0 / 0) | 1.000 | 3.1 s |
+| spurious cavity | box with cavity | RemoveCavity | 1 / 0 / 0 (1 / 0 / 0) | 1.000 | 1.4 s |
+| spurious tunnel | box with tunnel | CloseTunnel | 1 / 0 / 0 (1 / 0 / 0) | 1.000 | 2.1 s |
+| extra body | ball + small ball | RemoveBody | 1 / 0 / 0 (1 / 0 / 0) | 1.000 | 0.9 s |
+
+The tests (`tests/test_csg_e2e.py`) check more than counts:
+- the same topology when the surface is offset by +-0.03, which rules out near-zero bridges,
+  tunnels and cavities;
+- no sub-threshold components;
+- consistent mesh and voxel measurements at both resolutions;
+- a >= 5x lower volume error than the initial state;
+- that the change came from a measured grammar edit.
+
+Two problems found while building this are fixed and covered by tests:
+- **Features hidden instead of edited.** Fitting before the first residual analysis let the
+  optimizer push the spurious cavity and tunnel out through the surface and slide the extra ball
+  inside the main one. That gave the right topology with dead features still in the
+  representation and no edit. The search now analyzes the initial state first and canonicalizes
+  every round.
+- **Wrong measure for void overlap.** The "missing material inside a void feature" evidence
+  measured overlap against the feature's whole volume, not the volume it carves; a long channel
+  capsule therefore never qualified for CloseTunnel.
+
+### Held-out benchmark (`python experiments/topology_search.py bench --split test`)
+
+Six families x 3 held-out seeds (100-102; development used seeds 0-1):
+- enclosed cavity;
+- through-tunnel;
+- two bodies;
+- bridged bodies;
+- an exact torus, which no finite set of these primitives represents;
+- plain solid as a control.
+
+Fixed and search start from the same generic initialization: one box matched to the target
+occupancy's moments. The oracle starts from the target's construction with perturbed
+parameters. All three get the same 510 committed steps; search spends its candidate trials on
+top of that.
+
+| method | topology matches target | median IoU | median surface error | median wall | candidate steps (median) |
+|---|---|---|---|---|---|
+| fixed structure | 6/18 (solid and bridge families only) | 0.743 | 0.0343 | 1.8 s | 0 |
+| **topology search** | **18/18** | **0.999** | **0.0004** | 3.1 s | 180 |
+| ORACLE (correct structure supplied) | 18/18 | 1.000 | 0.0003 | 2.7 s | 0 |
+
+- **Accepted edits by family.** Cavity: AddCavity. Tunnel: BridgeVoid. Two bodies: PinchBody
+  (split). Bridge: two AddBody; the initial box is fitted into the connecting rod and the two
+  added spheres become the end balls (topology stays one component throughout: these are
+  geometric additions, not topology changes). Torus: BridgeVoid, then two AddBody. Solid: no
+  edit.
+- **Torus.** Not exactly representable: search gets the topology (genus 1) at IoU 0.82-0.85,
+  above the approximate oracle structure (a flat box minus a channel, 0.70-0.74).
+
+### Limitations
+
+- **Controlled cases, not general reconstruction.** Each target has at most one topological
+  feature, and the families were designed together with the proposal rules. Held-out means
+  held-out *parameters*, not unseen kinds of structure. This does not show general
+  unknown-topology reconstruction.
+- **Representation limits.** Nested shells (material inside a cavity) and features that need
+  more than one primitive are outside the representation. CSG difference distances are lower
+  bounds, not exact, inside cuts.
+- **Resolution dependence.** Topology is measured on grids. Features under ~2 cells (0.06-0.09
+  here) can vanish or merge, and primitives are kept at radius >= 0.06 for this reason.
+- **Greedy search.** At most one edit per round; combinations that only pay off together (e.g.
+  remove-then-add) need two rounds and are not searched jointly.
+- **No B-spline output.** Conversion to an explicit patch complex is future work (README).
+

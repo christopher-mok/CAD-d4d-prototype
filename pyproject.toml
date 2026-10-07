@@ -22,7 +22,7 @@ test = ["pytest"]
 where = ["src"]
 
 [tool.setuptools.package-data]
-cad_d4d = ["visualization/*.html"]
+cad_d4d = ["visualization/*.html", "csg/*.html"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

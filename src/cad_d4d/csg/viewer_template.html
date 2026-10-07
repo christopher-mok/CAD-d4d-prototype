@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Topology Search Viewer</title>
+<style>
+:root {
+  --bg: #fcfcfb; --panel: #f4f3f0; --ink: #0b0b0b; --ink2: #52514e; --muted: #9a9893; --line: #e4e3df;
+  --missing: #2a78d6; --excess: #eb6834; --ok: #1baf7a; --bad: #e34948; --accent: #2a78d6;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #161615; --panel: #201f1e; --ink: #f1f0ec; --ink2: #b9b7b1; --muted: #7d7b76; --line: #33322f;
+    --missing: #5c9ce6; --excess: #f08a5d; --ok: #3cc794; --bad: #f06b6a; --accent: #5c9ce6;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #161615; --panel: #201f1e; --ink: #f1f0ec; --ink2: #b9b7b1; --muted: #7d7b76; --line: #33322f;
+  --missing: #5c9ce6; --excess: #f08a5d; --ok: #3cc794; --bad: #f06b6a; --accent: #5c9ce6;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+header { padding: 12px 16px; border-bottom: 1px solid var(--line); display: flex; gap: 12px; align-items: baseline; flex-wrap: wrap; }
+header h1 { font-size: 16px; margin: 0; }
+header .sub { color: var(--ink2); font-size: 13px; }
+main { display: grid; grid-template-columns: 220px 1fr 340px; height: calc(100vh - 50px); }
+@media (max-width: 900px) { main { grid-template-columns: 1fr; height: auto; } #view { height: 60vh; } }
+nav { border-right: 1px solid var(--line); overflow: auto; padding: 8px; }
+nav button { display: block; width: 100%; text-align: left; padding: 6px 8px; margin: 2px 0; border: 0; border-radius: 6px;
+  background: transparent; color: var(--ink); font: inherit; cursor: pointer; }
+nav button.on { background: var(--panel); font-weight: 600; }
+nav .tag { color: var(--ink2); font-size: 12px; }
+#view { position: relative; min-height: 320px; }
+#controls { position: absolute; left: 12px; right: 12px; bottom: 12px; display: flex; gap: 12px; align-items: center; flex-wrap: wrap;
+  background: color-mix(in srgb, var(--bg) 88%, transparent); padding: 8px 10px; border-radius: 8px; border: 1px solid var(--line); }
+#controls label { display: flex; gap: 5px; align-items: center; font-size: 13px; color: var(--ink2); }
+#controls input[type=range] { width: 180px; }
+.swatch { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+aside { border-left: 1px solid var(--line); overflow: auto; padding: 10px 12px; }
+aside h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--ink2); margin: 14px 0 6px; }
+table { border-collapse: collapse; width: 100%; font-size: 12.5px; }
+td, th { padding: 3px 4px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+th { color: var(--ink2); font-weight: 500; }
+.st-accepted { color: var(--ok); font-weight: 600; } .st-failed { color: var(--bad); } .st-protected, .st-rejected { color: var(--ink2); }
+.mono { font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
+#snaplabel { min-width: 110px; color: var(--ink); font-weight: 600; }
+</style>
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+} }
+</script>
+</head>
+<body>
+<header><h1 id="title">Topology search</h1><span class="sub">CSG reconstruction (not B-spline CAD). Drag to orbit, scroll to zoom.</span></header>
+<main>
+  <nav id="runs"></nav>
+  <div id="view">
+    <div id="controls">
+      <label>State <input id="snap" type="range" min="0" max="0" value="0"><span id="snaplabel"></span></label>
+      <label><input id="showTarget" type="checkbox" checked> target (wire)</label>
+      <label><input id="showRecon" type="checkbox" checked> reconstruction</label>
+      <label><input id="showMissing" type="checkbox" checked><span class="swatch" style="background:var(--missing)"></span> missing material</label>
+      <label><input id="showExcess" type="checkbox" checked><span class="swatch" style="background:var(--excess)"></span> excess material</label>
+    </div>
+  </div>
+  <aside>
+    <h2>Metrics</h2><table id="metrics"></table>
+    <h2>Accepted edits</h2><table id="events"></table>
+    <h2>All candidates</h2><table id="trials"></table>
+    <h2>Features (shown state)</h2><table id="features"></table>
+  </aside>
+</main>
+<script id="topo-data" type="application/json">__TOPO_DATA__</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+const DATA = JSON.parse(document.getElementById('topo-data').textContent);
+document.getElementById('title').textContent = DATA.title;
+const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const view = document.getElementById('view');
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(window.devicePixelRatio);
+view.prepend(renderer.domElement);
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(css('--bg'));
+const camera = new THREE.PerspectiveCamera(40, 1, 0.01, 50);
+camera.position.set(2.4, 1.8, 2.6);
+const controls = new OrbitControls(camera, renderer.domElement);
+scene.add(new THREE.HemisphereLight(0xffffff, 0x666666, 1.6));
+const dl = new THREE.DirectionalLight(0xffffff, 1.4); dl.position.set(3, 4, 2); scene.add(dl);
+const groups = { target: new THREE.Group(), recon: new THREE.Group(), missing: new THREE.Group(), excess: new THREE.Group() };
+Object.values(groups).forEach(g => scene.add(g));
+function resize() { const w = view.clientWidth, h = view.clientHeight; renderer.setSize(w, h); camera.aspect = w / h; camera.updateProjectionMatrix(); }
+window.addEventListener('resize', resize);
+function bytes(b64) { const s = atob(b64), u = new Uint8Array(s.length); for (let i = 0; i < s.length; i++) u[i] = s.charCodeAt(i); return u.buffer; }
+function geom(m) {
+  const q = new Uint16Array(bytes(m.v)), v = new Float32Array(q.length), sc = (m.hi - m.lo) / 65535;
+  for (let i = 0; i < q.length; i++) v[i] = m.lo + q[i] * sc;
+  const f = m.i32 ? new Uint32Array(bytes(m.f)) : new Uint16Array(bytes(m.f));
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(v, 3));
+  g.setIndex(new THREE.BufferAttribute(f, 1)); g.computeVertexNormals(); return g;
+}
+function points(arr, color) {
+  const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(arr, 3));
+  return new THREE.Points(g, new THREE.PointsMaterial({ color, size: 0.035 }));
+}
+function clear(g) { while (g.children.length) { const c = g.children.pop(); c.geometry.dispose(); } }
+let run = null;
+function showSnap(i) {
+  const s = run.snapshots[i];
+  document.getElementById('snaplabel').textContent = s.label;
+  clear(groups.recon); clear(groups.missing); clear(groups.excess);
+  groups.recon.add(new THREE.Mesh(geom(s.mesh), new THREE.MeshStandardMaterial({ color: 0xc9d6e8, roughness: .55, metalness: 0, side: THREE.DoubleSide })));
+  groups.missing.add(points(s.residual.missing, css('--missing')));
+  groups.excess.add(points(s.residual.excess, css('--excess')));
+  document.getElementById('features').innerHTML = '<tr><th>id</th><th>role</th><th>kind</th><th>op</th></tr>' +
+    s.features.map(f => `<tr><td>${f.id}</td><td>${f.role}</td><td>${f.kind}</td><td>${f.op ?? ''}</td></tr>`).join('');
+}
+const fmt = v => typeof v === 'number' ? (Math.abs(v) >= 1e3 || (Math.abs(v) < 1e-3 && v !== 0) ? v.toExponential(2) : +v.toFixed(4)) : (v ?? '');
+function select(k) {
+  run = DATA.runs[k];
+  document.querySelectorAll('nav button').forEach((b, j) => b.classList.toggle('on', j === k));
+  clear(groups.target);
+  groups.target.add(new THREE.Mesh(geom(run.target), new THREE.MeshBasicMaterial({ color: css('--ink2'), wireframe: true, transparent: true, opacity: 0.18 })));
+  const sl = document.getElementById('snap'); sl.max = run.snapshots.length - 1; sl.value = sl.max; showSnap(+sl.value);
+  document.getElementById('metrics').innerHTML = Object.entries(run.metrics).map(([k, v]) =>
+    `<tr><th>${k}</th><td class="mono">${typeof v === 'object' && v !== null ? JSON.stringify(v) : fmt(v)}</td></tr>`).join('');
+  document.getElementById('events').innerHTML = run.events.length ? '<tr><th>rnd</th><th>edit</th><th>measured</th></tr>' + run.events.map(e =>
+    `<tr><td>${e.round}</td><td><b>${e.op}</b><br><span class="mono">score ${fmt(e.score)} &gt; ${fmt(e.threshold)}</span></td><td class="mono">${e.measured_before}<br>&rarr; ${e.measured_after}</td></tr>`).join('')
+    : '<tr><td>no edit accepted</td></tr>';
+  document.getElementById('trials').innerHTML = '<tr><th>rnd</th><th>op</th><th>status</th><th>score / reason</th></tr>' + run.trials.map(t =>
+    `<tr><td>${t.round}</td><td>${t.op}</td><td class="st-${t.status}">${t.status}</td><td class="mono">${t.score !== undefined ? fmt(t.score) : (t.reason ?? '')}</td></tr>`).join('');
+}
+const nav = document.getElementById('runs');
+DATA.runs.forEach((r, k) => {
+  const b = document.createElement('button');
+  const m = r.metrics || {};
+  b.innerHTML = `${r.name}<br><span class="tag">${m.topology_match === undefined ? '' : (m.topology_match ? 'topology matches' : 'topology differs')}</span>`;
+  b.onclick = () => select(k); nav.appendChild(b);
+});
+document.getElementById('snap').oninput = e => showSnap(+e.target.value);
+for (const [id, g] of [['showTarget', 'target'], ['showRecon', 'recon'], ['showMissing', 'missing'], ['showExcess', 'excess']])
+  document.getElementById(id).onchange = e => { groups[g].visible = e.target.checked; };
+resize(); if (DATA.runs.length) select(0);
+(function loop() { requestAnimationFrame(loop); controls.update(); renderer.render(scene, camera); })();
+</script>
+</body>
+</html>

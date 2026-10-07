@@ -3,6 +3,7 @@
     python experiments/make_figures.py targets                 # gallery of all benchmark targets
     python experiments/make_figures.py fits a_super_bumps:1 ... # target | uniform | SRD v3 | SRD v4
     python experiments/make_figures.py efficiency               # per-target efficiency (needs benchmark results)
+    python experiments/make_figures.py topology                 # CSG topology search: 7 end-to-end cases
 
 fits runs SRD twice (v3 = lumped-metric scoring, v4 = default) and the uniform model with
 the closest control-point count; GPU runs are not bit-reproducible, so figures vary by run.
@@ -176,6 +177,55 @@ def fig_efficiency():
         print(m)
 
 
+def _cutaway(ax, sdf_fn, color, title, view=(22, -58), n=56, cut: float | None = 0.0):
+    """Marching-tetrahedra surface with the part y > ``cut`` removed (shows cavities and tunnels)."""
+    from cad_d4d.csg.mesh import marching_tetrahedra, node_lattice
+    P = node_lattice(-1.2, 1.2, n)
+    with torch.no_grad():
+        f = sdf_fn(torch.as_tensor(P, dtype=torch.float64)).numpy()
+    V, F, _ = marching_tetrahedra(f, P, n + 1)
+    tris = V[F]
+    if cut is not None:
+        tris = tris[tris[:, :, 1].mean(1) < cut]
+    base = np.tile(np.array([color]), (len(tris), 1))
+    ax.add_collection3d(Poly3DCollection(tris, facecolors=_shade(base, tris, view), edgecolors="none"))
+    for set_lim in (ax.set_xlim, ax.set_ylim, ax.set_zlim):
+        set_lim(-1.0, 1.0)
+    ax.set_box_aspect((1, 1, 1), zoom=1.5)
+    ax.set_axis_off()
+    ax.view_init(*view)
+    ax.set_title(title, fontsize=9, color=INK)
+
+
+def fig_topology():
+    from cad_d4d.csg import Grid, SearchConfig, TopoObjective, TopologySearch, measure_multi
+    from cad_d4d.csg.targets import CASES
+    names = list(CASES)
+    fig = plt.figure(figsize=(2.3 * len(names), 7.4))
+    blue, grey, green = (0.80, 0.86, 0.95, 1.0), (0.86, 0.85, 0.83, 1.0), (0.78, 0.90, 0.84, 1.0)
+    for j, name in enumerate(names):
+        tgt, init, _ = CASES[name]()
+        res = TopologySearch(TopoObjective(tgt, Grid(32)), SearchConfig()).run(init)
+        def topo_str(fn):
+            m = measure_multi(fn, ns=(56, 80))
+            return f"{m['components']} comp, {m['cavities']} cav, genus {m['genus']}"
+        edits = ", ".join(e["op"] for e in res.events) or "no edit"
+        panels = ((init.sdf, grey, name + "\ninitial: " + topo_str(init.sdf)),
+                  (tgt.sdf, blue, "target: " + topo_str(tgt.sdf)),
+                  (res.solid.sdf, green, edits + "\n-> " + topo_str(res.solid.sdf)))
+        for i, (fn, col, lab) in enumerate(panels):
+            ax = fig.add_subplot(3, len(names), i * len(names) + j + 1, projection="3d")
+            _cutaway(ax, fn, col, lab, cut=None if name == "extra_body" else 0.0)
+    fig.text(0.005, 0.83, "initial", rotation=90, fontsize=11, color=INK_2)
+    fig.text(0.005, 0.52, "target", rotation=90, fontsize=11, color=INK_2)
+    fig.text(0.005, 0.15, "reconstruction", rotation=90, fontsize=11, color=INK_2)
+    fig.suptitle("Residual-guided topology search on CSG solids (half y > 0 cut away except extra_body; "
+                 "topology measured at 56^3 and 80^3)",
+                 fontsize=11)
+    fig.subplots_adjust(left=0.02, right=0.99, top=0.9, bottom=0.01, wspace=0.02, hspace=0.25)
+    fig.savefig(OUT / "topology_cases.png", dpi=90)
+
+
 if __name__ == "__main__":
     OUT.mkdir(parents=True, exist_ok=True)
     cmd = sys.argv[1] if len(sys.argv) > 1 else "targets"
@@ -185,5 +235,7 @@ if __name__ == "__main__":
         fig_fits(sys.argv[2:] or ["a_super_bumps:1"])
     elif cmd == "efficiency":
         fig_efficiency()
+    elif cmd == "topology":
+        fig_topology()
     else:
         raise SystemExit(__doc__)
